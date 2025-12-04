@@ -15,8 +15,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F5F5F5',
-    ...(Platform.OS === 'web' && {
-      minHeight: '100vh',
-    }),
+    minHeight: Platform.OS === 'web' ? ('100vh' as any) : undefined,
   },
 });
