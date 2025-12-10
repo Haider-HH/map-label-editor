@@ -7,6 +7,7 @@ interface NewLabelModalProps {
   onClose: () => void;
   onConfirm: (labelData: {
     type: LabelType;
+    customType?: string;
     blockNumber: string;
     houseNumber: string;
     color: string;
@@ -32,6 +33,7 @@ const COLOR_PRESETS = [
 
 const NewLabelModal: React.FC<NewLabelModalProps> = ({ visible, onClose, onConfirm }) => {
   const [type, setType] = useState<LabelType>('residential');
+  const [customType, setCustomType] = useState('');
   const [blockNumber, setBlockNumber] = useState('');
   const [houseNumber, setHouseNumber] = useState('');
   const [color, setColor] = useState('#4A90D9');
@@ -39,6 +41,7 @@ const NewLabelModal: React.FC<NewLabelModalProps> = ({ visible, onClose, onConfi
   const handleConfirm = () => {
     onConfirm({
       type,
+      customType: type === 'other' ? customType.trim() : undefined,
       blockNumber: blockNumber.trim(),
       houseNumber: houseNumber.trim(),
       color,
@@ -49,6 +52,7 @@ const NewLabelModal: React.FC<NewLabelModalProps> = ({ visible, onClose, onConfi
 
   const resetForm = () => {
     setType('residential');
+    setCustomType('');
     setBlockNumber('');
     setHouseNumber('');
     setColor('#4A90D9');
@@ -96,6 +100,15 @@ const NewLabelModal: React.FC<NewLabelModalProps> = ({ visible, onClose, onConfi
                       </TouchableOpacity>
                     ))}
                   </View>
+                  {/* Custom Type Input - shown when 'other' is selected */}
+                  {type === 'other' && (
+                    <TextInput
+                      style={[styles.input, { marginTop: 12 }]}
+                      value={customType}
+                      onChangeText={setCustomType}
+                      placeholder="Enter custom type name"
+                    />
+                  )}
                 </View>
 
                 {/* Block Number */}

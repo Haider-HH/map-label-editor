@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, ScrollView, Platform } from 'react-native';
 import { Label, LabelType } from '../types';
 
@@ -39,6 +39,14 @@ const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
   onDelete,
   onClose,
 }) => {
+  // Local state for area input to allow typing decimal points
+  const [areaText, setAreaText] = useState(label.area?.toString() || '');
+  
+  // Sync area text when label changes (e.g., selecting different label)
+  useEffect(() => {
+    setAreaText(label.area?.toString() || '');
+  }, [label.id, label.area]);
+
   // Calculate area from points (shoelace formula)
   const calculateArea = (points: { x: number; y: number }[]): number => {
     if (points.length < 3) return 0;
@@ -97,6 +105,15 @@ const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
               </TouchableOpacity>
             ))}
           </View>
+          {/* Custom Type Input - shown when 'other' is selected */}
+          {currentType === 'other' && (
+            <TextInput
+              style={[styles.input, { marginTop: 12 }]}
+              value={label.customType || ''}
+              onChangeText={(text) => onUpdate({ customType: text })}
+              placeholder="Enter custom type name"
+            />
+          )}
         </View>
 
         {/* Block Number */}
@@ -126,13 +143,33 @@ const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
           <Text style={styles.fieldLabel}>Area (m²)</Text>
           <TextInput
             style={styles.input}
-            value={label.area?.toString() || ''}
+            value={areaText}
             onChangeText={(text) => {
-              const num = parseFloat(text);
-              onUpdate({ area: isNaN(num) ? undefined : num });
+              // Allow empty string, numbers, and partial decimal input (e.g., "160.")
+              if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                setAreaText(text);
+                // Only update the label if it's a valid complete number
+                if (text === '') {
+                  onUpdate({ area: undefined });
+                } else if (!text.endsWith('.')) {
+                  const num = parseFloat(text);
+                  if (!isNaN(num)) {
+                    onUpdate({ area: num });
+                  }
+                }
+              }
             }}
-            placeholder="Enter area in square meters"
-            keyboardType="numeric"
+            onBlur={() => {
+              // On blur, ensure the value is synced
+              if (areaText && !areaText.endsWith('.')) {
+                const num = parseFloat(areaText);
+                if (!isNaN(num)) {
+                  onUpdate({ area: num });
+                }
+              }
+            }}
+            placeholder="Enter area in square meters (e.g., 160.5)"
+            keyboardType="decimal-pad"
           />
           <Text style={styles.hint}>Pixel area: {pixelArea.toFixed(0)} px²</Text>
         </View>

@@ -58,7 +58,11 @@ const LabelDetailsModal: React.FC<LabelDetailsModalProps> = ({ label, visible, o
                   </View>
                   <View style={styles.infoRow}>
                     <Text style={styles.infoLabel}>Type:</Text>
-                    <Text style={styles.infoValue}>{label.type}</Text>
+                    <Text style={styles.infoValue}>
+                      {label.type === 'other' && label.customType 
+                        ? `Other (${label.customType})` 
+                        : label.type}
+                    </Text>
                   </View>
                   <View style={styles.infoRow}>
                     <Text style={styles.infoLabel}>Original Type:</Text>

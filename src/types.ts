@@ -8,6 +8,7 @@ export type LabelType = 'residential' | 'commercial' | 'park' | 'mosque' | 'scho
 export interface Label {
   id: string;
   type: LabelType | string; // string allows legacy "polygon" type
+  customType?: string; // Custom type name when type is 'other'
   points: Point[];
   // Properties specific to plot/site maps
   area?: number; // in square meters

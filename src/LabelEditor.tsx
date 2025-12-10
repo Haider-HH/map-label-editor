@@ -245,6 +245,22 @@ const extractAreaFromRegion = async (
       }
     }
     
+    // Also look for patterns where OCR might have read decimal point as comma, space, or other char
+    // e.g., "160,0" "160 0" "160-0" should all be "160.0"
+    const altDecimalPattern = /(\d+)[,\s\-](\d)/g;
+    while ((match = altDecimalPattern.exec(text)) !== null) {
+      const value = parseFloat(`${match[1]}.${match[2]}`);
+      if (value >= 50 && value <= 1000) {
+        foundNumbers.push({ 
+          value, 
+          hasDecimal: true, 
+          hasUnit: false, 
+          fontSize: 0,
+          text: match[0]
+        });
+      }
+    }
+    
     // If we found decimal numbers, prefer them (area values often have decimals)
     if (foundNumbers.length > 0 && foundNumbers.some(n => n.hasDecimal)) {
       const withDecimal = foundNumbers.find(n => n.hasDecimal);
@@ -252,15 +268,29 @@ const extractAreaFromRegion = async (
     }
     
     // Look for whole numbers, but filter out likely house numbers
-    const wholeNumberPattern = /\b(\d{2,4})\b/g;
+    const wholeNumberPattern = /\b(\d{2,5})\b/g;
     while ((match = wholeNumberPattern.exec(text)) !== null) {
-      const value = parseInt(match[1], 10);
+      let value = parseInt(match[1], 10);
+      const originalText = match[1];
       
       // Skip if this looks like the house number
       if (expectedHouseNumber !== undefined) {
         // Skip if it matches the expected house number or is very close
         if (Math.abs(value - expectedHouseNumber) <= 2) {
           continue;
+        }
+      }
+      
+      // OCR often misses decimal points - common area values are like 160.0, 200.0, 240.0
+      // If we see numbers like 1600, 2000, 2400 that end in 0, they might be missing decimal
+      // Check if the number ends in 0 and dividing by 10 gives a reasonable area value
+      let hasImpliedDecimal = false;
+      if (originalText.endsWith('0') && value >= 1000 && value <= 100000) {
+        const adjustedValue = value / 10;
+        // Common area values are typically 100-500 sq meters for residential plots
+        if (adjustedValue >= 100 && adjustedValue <= 1000) {
+          value = adjustedValue;
+          hasImpliedDecimal = true;
         }
       }
       
@@ -271,7 +301,7 @@ const extractAreaFromRegion = async (
       if (value >= 100 && value <= 10000) {
         foundNumbers.push({ 
           value, 
-          hasDecimal: false, 
+          hasDecimal: hasImpliedDecimal, 
           hasUnit: false, 
           fontSize: 0,
           text: match[0]
@@ -783,30 +813,104 @@ const LabelEditor: React.FC = () => {
     saveHistory();
     
     const { start, end } = batchSelectionRect;
-    const width = end.x - start.x;
-    const height = end.y - start.y;
-    const cellWidth = width / config.cols;
-    const cellHeight = height / config.rows;
+    const totalWidth = end.x - start.x;
+    const totalHeight = end.y - start.y;
+    
+    // Calculate cell positions based on custom widths or equal distribution
+    const getCellBounds = (row: number, col: number): { x: number; y: number; width: number; height: number } => {
+      let cellX = start.x;
+      let cellY = start.y;
+      let cellWidth: number;
+      let cellHeight: number;
+      
+      // Handle column widths
+      if (config.useCustomWidths && config.columnWidths && config.columnWidths.length === config.cols) {
+        const totalProportion = config.columnWidths.reduce((a, b) => a + b, 0);
+        // Calculate x position by summing previous column widths
+        for (let c = 0; c < col; c++) {
+          cellX += (config.columnWidths[c] / totalProportion) * totalWidth;
+        }
+        cellWidth = (config.columnWidths[col] / totalProportion) * totalWidth;
+      } else {
+        // Equal widths
+        cellX = start.x + col * (totalWidth / config.cols);
+        cellWidth = totalWidth / config.cols;
+      }
+      
+      // Handle row heights
+      if (config.useCustomWidths && config.rowHeights && config.rowHeights.length === config.rows) {
+        const totalProportion = config.rowHeights.reduce((a, b) => a + b, 0);
+        // Calculate y position by summing previous row heights
+        for (let r = 0; r < row; r++) {
+          cellY += (config.rowHeights[r] / totalProportion) * totalHeight;
+        }
+        cellHeight = (config.rowHeights[row] / totalProportion) * totalHeight;
+      } else {
+        // Equal heights
+        cellY = start.y + row * (totalHeight / config.rows);
+        cellHeight = totalHeight / config.rows;
+      }
+      
+      return { x: cellX, y: cellY, width: cellWidth, height: cellHeight };
+    };
     
     // Calculate house number for each cell position based on numbering order
     const getHouseNumber = (row: number, col: number): number => {
-      const { rows, cols, startHouseNumber, numberingOrder } = config;
+      const { rows, cols, startHouseNumber, houseNumberIncrement, numberingOrder, useCustomSequence, customSequence } = config;
+      const increment = houseNumberIncrement || 1;
+      
+      // Calculate the sequential index based on numbering order
+      let sequenceIndex: number;
       
       switch (numberingOrder) {
         case 'ltr':
+          sequenceIndex = row * cols + col;
+          break;
+        case 'rtl':
+          sequenceIndex = row * cols + (cols - 1 - col);
+          break;
+        case 'boustrophedon':
+          sequenceIndex = row % 2 === 0 
+            ? row * cols + col 
+            : row * cols + (cols - 1 - col);
+          break;
+        case 'col-ltr':
+          sequenceIndex = col * rows + row;
+          break;
+        case 'col-rtl':
+          sequenceIndex = (cols - 1 - col) * rows + row;
+          break;
+        case 'evens-odds':
+        case 'odds-evens':
+          // These have special handling below
+          sequenceIndex = row * cols + col;
+          break;
+        default:
+          sequenceIndex = row * cols + col;
+      }
+      
+      // If using custom sequence, get the number from the sequence array
+      if (useCustomSequence && customSequence && customSequence.length > 0) {
+        // Use modulo to cycle through the sequence if there are more cells than numbers
+        return customSequence[sequenceIndex % customSequence.length];
+      }
+      
+      // Regular increment-based numbering
+      switch (numberingOrder) {
+        case 'ltr':
           // Left to right, top to bottom: 1 2 3 4 5 / 6 7 8 9 10
-          return startHouseNumber + row * cols + col;
+          return startHouseNumber + (row * cols + col) * increment;
           
         case 'rtl':
           // Right to left, top to bottom: 5 4 3 2 1 / 10 9 8 7 6
-          return startHouseNumber + row * cols + (cols - 1 - col);
+          return startHouseNumber + (row * cols + (cols - 1 - col)) * increment;
           
         case 'boustrophedon':
           // Alternating snake pattern: 1 2 3 4 5 / 10 9 8 7 6
           if (row % 2 === 0) {
-            return startHouseNumber + row * cols + col;
+            return startHouseNumber + (row * cols + col) * increment;
           } else {
-            return startHouseNumber + row * cols + (cols - 1 - col);
+            return startHouseNumber + (row * cols + (cols - 1 - col)) * increment;
           }
           
         case 'evens-odds':
@@ -817,15 +921,15 @@ const LabelEditor: React.FC = () => {
             if (row === 0) {
               // Even numbers starting from startHouseNumber (if even) or startHouseNumber+1
               const firstEven = startHouseNumber % 2 === 0 ? startHouseNumber : startHouseNumber + 1;
-              return firstEven + col * 2;
+              return firstEven + col * 2 * increment;
             } else {
               // Odd numbers
               const firstOdd = startHouseNumber % 2 === 1 ? startHouseNumber : startHouseNumber + 1;
-              return firstOdd + col * 2;
+              return firstOdd + col * 2 * increment;
             }
           }
           // For more than 2 rows, fall back to regular pattern
-          return startHouseNumber + row * cols + col;
+          return startHouseNumber + (row * cols + col) * increment;
           
         case 'odds-evens':
           // Odds on first row, evens on second: 1 3 5 7 9 / 2 4 6 8 10
@@ -833,26 +937,26 @@ const LabelEditor: React.FC = () => {
             if (row === 0) {
               // Odd numbers
               const firstOdd = startHouseNumber % 2 === 1 ? startHouseNumber : startHouseNumber + 1;
-              return firstOdd + col * 2;
+              return firstOdd + col * 2 * increment;
             } else {
               // Even numbers
               const firstEven = startHouseNumber % 2 === 0 ? startHouseNumber : startHouseNumber + 1;
-              return firstEven + col * 2;
+              return firstEven + col * 2 * increment;
             }
           }
           // For more than 2 rows, fall back to regular pattern
-          return startHouseNumber + row * cols + col;
+          return startHouseNumber + (row * cols + col) * increment;
           
         case 'col-ltr':
           // Column by column, left to right: 1 3 5 / 2 4 6
-          return startHouseNumber + col * rows + row;
+          return startHouseNumber + (col * rows + row) * increment;
           
         case 'col-rtl':
           // Column by column, right to left
-          return startHouseNumber + (cols - 1 - col) * rows + row;
+          return startHouseNumber + ((cols - 1 - col) * rows + row) * increment;
           
         default:
-          return startHouseNumber + row * cols + col;
+          return startHouseNumber + (row * cols + col) * increment;
       }
     };
     
@@ -863,8 +967,7 @@ const LabelEditor: React.FC = () => {
     
     for (let row = 0; row < config.rows; row++) {
       for (let col = 0; col < config.cols; col++) {
-        const cellX = start.x + col * cellWidth;
-        const cellY = start.y + row * cellHeight;
+        const { x: cellX, y: cellY, width: cellWidth, height: cellHeight } = getCellBounds(row, col);
         
         const currentHouseNum = getHouseNumber(row, col);
         

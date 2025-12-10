@@ -23,6 +23,13 @@ export interface BatchConfig {
   cols: number;
   startBlockNumber: string;
   startHouseNumber: number;
+  houseNumberIncrement: number;
+  customSequence?: number[]; // Custom sequence of house numbers
+  useCustomSequence: boolean;
+  // Custom column/row proportions (e.g., "1,2,1" means middle column is twice as wide)
+  useCustomWidths: boolean;
+  columnWidths?: number[]; // Relative widths for each column
+  rowHeights?: number[]; // Relative heights for each row
   type: LabelType;
   color: string;
   numberingDirection: 'row' | 'col';
@@ -56,6 +63,12 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
   const [cols, setCols] = useState('5');
   const [startBlockNumber, setStartBlockNumber] = useState('G 01');
   const [startHouseNumber, setStartHouseNumber] = useState('1');
+  const [houseNumberIncrement, setHouseNumberIncrement] = useState('1');
+  const [useCustomSequence, setUseCustomSequence] = useState(false);
+  const [customSequenceText, setCustomSequenceText] = useState('');
+  const [useCustomWidths, setUseCustomWidths] = useState(false);
+  const [columnWidthsText, setColumnWidthsText] = useState('');
+  const [rowHeightsText, setRowHeightsText] = useState('');
   const [type, setType] = useState<LabelType>('residential');
   const [color, setColor] = useState('#4A90D9');
   const [numberingDirection, setNumberingDirection] = useState<'row' | 'col'>('row');
@@ -63,12 +76,41 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
   const [autoDetectColor, setAutoDetectColor] = useState(false);
   const [autoDetectArea, setAutoDetectArea] = useState(false);
 
+  // Parse custom sequence from text
+  const parseCustomSequence = (text: string): number[] => {
+    return text
+      .split(/[,\s]+/)
+      .map(s => parseInt(s.trim(), 10))
+      .filter(n => !isNaN(n));
+  };
+
+  // Parse proportions from text (e.g., "1,2,1" or "1 2 1")
+  const parseProportions = (text: string): number[] => {
+    return text
+      .split(/[,\s]+/)
+      .map(s => parseFloat(s.trim()))
+      .filter(n => !isNaN(n) && n > 0);
+  };
+
+  const customSequence = parseCustomSequence(customSequenceText);
+  const columnWidths = parseProportions(columnWidthsText);
+  const rowHeights = parseProportions(rowHeightsText);
+
+  const numCols = parseInt(cols) || 1;
+  const numRows = parseInt(rows) || 1;
+
   const handleConfirm = () => {
     onConfirm({
-      rows: parseInt(rows) || 1,
-      cols: parseInt(cols) || 1,
+      rows: numRows,
+      cols: numCols,
       startBlockNumber,
       startHouseNumber: parseInt(startHouseNumber) || 1,
+      houseNumberIncrement: parseInt(houseNumberIncrement) || 1,
+      useCustomSequence,
+      customSequence: useCustomSequence ? customSequence : undefined,
+      useCustomWidths,
+      columnWidths: useCustomWidths && columnWidths.length > 0 ? columnWidths : undefined,
+      rowHeights: useCustomWidths && rowHeights.length > 0 ? rowHeights : undefined,
       type,
       color,
       numberingDirection,
@@ -117,6 +159,57 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
                   </View>
                 </View>
 
+                {/* Custom Widths Toggle */}
+                <View style={styles.field}>
+                  <TouchableOpacity
+                    style={[
+                      styles.checkboxRow,
+                      useCustomWidths && styles.checkboxRowActive,
+                    ]}
+                    onPress={() => setUseCustomWidths(!useCustomWidths)}
+                  >
+                    <View style={[styles.checkbox, useCustomWidths && styles.checkboxChecked]}>
+                      {useCustomWidths && <Text style={styles.checkmark}>✓</Text>}
+                    </View>
+                    <Text style={styles.checkboxLabel}>Custom cell sizes (for unequal widths)</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {useCustomWidths && (
+                  <>
+                    <View style={styles.field}>
+                      <Text style={styles.fieldLabel}>Column Proportions</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={columnWidthsText}
+                        onChangeText={setColumnWidthsText}
+                        placeholder={`e.g., 1, 2, 1 for ${numCols} columns`}
+                      />
+                      <Text style={styles.hint}>
+                        Enter relative widths (e.g., "1, 2, 1" = middle is 2× wider).
+                        {columnWidths.length > 0 && columnWidths.length !== numCols && (
+                          `\n⚠️ Need ${numCols} values, have ${columnWidths.length}`
+                        )}
+                      </Text>
+                    </View>
+                    <View style={styles.field}>
+                      <Text style={styles.fieldLabel}>Row Proportions (optional)</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={rowHeightsText}
+                        onChangeText={setRowHeightsText}
+                        placeholder={`e.g., 1, 1 for ${numRows} rows`}
+                      />
+                      <Text style={styles.hint}>
+                        Leave empty for equal heights.
+                        {rowHeights.length > 0 && rowHeights.length !== numRows && (
+                          `\n⚠️ Need ${numRows} values, have ${rowHeights.length}`
+                        )}
+                      </Text>
+                    </View>
+                  </>
+                )}
+
                 {/* Block Number */}
                 <View style={styles.field}>
                   <Text style={styles.fieldLabel}>Block Number (for all)</Text>
@@ -128,20 +221,92 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
                   />
                 </View>
 
-                {/* House Number Start */}
+                {/* House Number Configuration */}
                 <View style={styles.field}>
-                  <Text style={styles.fieldLabel}>Starting House Number</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={startHouseNumber}
-                    onChangeText={setStartHouseNumber}
-                    keyboardType="numeric"
-                    placeholder="1"
-                  />
-                  <Text style={styles.hint}>
-                    Will create houses {startHouseNumber} to {parseInt(startHouseNumber || '1') + totalLabels - 1}
-                  </Text>
+                  <Text style={styles.fieldLabel}>Numbering Mode</Text>
+                  <View style={styles.row}>
+                    <TouchableOpacity
+                      style={[
+                        styles.modeButton,
+                        !useCustomSequence && styles.modeButtonActive,
+                      ]}
+                      onPress={() => setUseCustomSequence(false)}
+                    >
+                      <Text style={[
+                        styles.modeButtonText,
+                        !useCustomSequence && styles.modeButtonTextActive,
+                      ]}>
+                        Regular
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.modeButton,
+                        useCustomSequence && styles.modeButtonActive,
+                      ]}
+                      onPress={() => setUseCustomSequence(true)}
+                    >
+                      <Text style={[
+                        styles.modeButtonText,
+                        useCustomSequence && styles.modeButtonTextActive,
+                      ]}>
+                        Custom Sequence
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
+
+                {!useCustomSequence ? (
+                  <>
+                    {/* Regular House Number Start */}
+                    <View style={styles.row}>
+                      <View style={[styles.field, { flex: 1 }]}>
+                        <Text style={styles.fieldLabel}>Starting House #</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={startHouseNumber}
+                          onChangeText={setStartHouseNumber}
+                          keyboardType="numeric"
+                          placeholder="1"
+                        />
+                      </View>
+                      <View style={[styles.field, { flex: 1 }]}>
+                        <Text style={styles.fieldLabel}>Increment</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={houseNumberIncrement}
+                          onChangeText={setHouseNumberIncrement}
+                          keyboardType="numeric"
+                          placeholder="1"
+                        />
+                      </View>
+                    </View>
+                    <Text style={styles.hint}>
+                      Will create: {startHouseNumber || '1'}, {parseInt(startHouseNumber || '1') + (parseInt(houseNumberIncrement || '1'))}, {parseInt(startHouseNumber || '1') + (parseInt(houseNumberIncrement || '1') * 2)}, ... ({totalLabels} labels)
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    {/* Custom Sequence */}
+                    <View style={styles.field}>
+                      <Text style={styles.fieldLabel}>Custom House Numbers</Text>
+                      <TextInput
+                        style={[styles.input, { minHeight: 60 }]}
+                        value={customSequenceText}
+                        onChangeText={setCustomSequenceText}
+                        placeholder="e.g., 3, 5, 6, 8, 9, 11, 12"
+                        multiline
+                      />
+                      <Text style={styles.hint}>
+                        Enter house numbers separated by commas or spaces.
+                        {customSequence.length > 0 && `\nParsed: ${customSequence.slice(0, 5).join(', ')}${customSequence.length > 5 ? '...' : ''} (${customSequence.length} numbers)`}
+                        {customSequence.length > 0 && customSequence.length < totalLabels && (
+                          `\n⚠️ Need ${totalLabels} numbers, have ${customSequence.length}`
+                        )}
+                      </Text>
+                    </View>
+                  </>
+                )}
 
                 {/* Numbering Direction */}
                 <View style={styles.field}>
@@ -564,6 +729,65 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     backgroundColor: '#F1F8E9',
     borderRadius: 6,
+  },
+  modeButton: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#F5F5F5',
+    borderWidth: 2,
+    borderColor: '#E0E0E0',
+    alignItems: 'center',
+  },
+  modeButtonActive: {
+    backgroundColor: '#E3F2FD',
+    borderColor: '#2196F3',
+  },
+  modeButtonText: {
+    fontSize: 13,
+    color: '#666',
+  },
+  modeButtonTextActive: {
+    color: '#1976D2',
+    fontWeight: '600',
+  },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#F5F5F5',
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+  },
+  checkboxRowActive: {
+    backgroundColor: '#E3F2FD',
+    borderColor: '#2196F3',
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: '#999',
+    marginRight: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  checkboxChecked: {
+    backgroundColor: '#2196F3',
+    borderColor: '#2196F3',
+  },
+  checkmark: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  checkboxLabel: {
+    fontSize: 14,
+    color: '#333',
   },
 });
 

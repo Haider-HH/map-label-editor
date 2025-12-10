@@ -354,7 +354,9 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
           const isSelected = selectedLabelId === label.id;
           const fillColor = getFillColor(label, isHovered, isSelected);
           const strokeColor = isSelected ? '#2196F3' : (isHovered ? '#FFFFFF' : '#00000050');
-          const strokeWidth = isSelected ? 3 : (isHovered ? 2 : 1);
+          // Dynamic stroke width based on zoom level
+          const baseStrokeWidth = isSelected ? 3 : (isHovered ? 2 : 1);
+          const strokeWidth = baseStrokeWidth / viewScale;
           const displayText = getLabelDisplayText(label);
 
           // Calculate center for text
@@ -375,22 +377,30 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
               />
               
               {/* Edit points when in edit mode and label is selected */}
-              {mode === 'edit' && isSelected && label.points.map((point, index) => (
-                <Circle
-                  key={`${label.id}-point-${index}`}
-                  cx={point.x * scale}
-                  cy={point.y * scale}
-                  r={8}
-                  fill={draggingPoint?.pointIndex === index ? '#1565C0' : '#2196F3'}
-                  stroke="#FFFFFF"
-                  strokeWidth={2}
-                  onPressIn={() => handlePointPressIn(label.id, index)}
-                  // @ts-ignore
-                  data-edit-point="true"
-                  data-label-id={label.id}
-                  data-point-index={index}
-                />
-              ))}
+              {mode === 'edit' && isSelected && label.points.map((point, index) => {
+                // Dynamic point size based on zoom level - smaller when zoomed in
+                const baseRadius = 8;
+                const baseStrokeWidth = 2;
+                const pointRadius = baseRadius / viewScale;
+                const pointStrokeWidth = baseStrokeWidth / viewScale;
+                
+                return (
+                  <Circle
+                    key={`${label.id}-point-${index}`}
+                    cx={point.x * scale}
+                    cy={point.y * scale}
+                    r={pointRadius}
+                    fill={draggingPoint?.pointIndex === index ? '#1565C0' : '#2196F3'}
+                    stroke="#FFFFFF"
+                    strokeWidth={pointStrokeWidth}
+                    onPressIn={() => handlePointPressIn(label.id, index)}
+                    // @ts-ignore
+                    data-edit-point="true"
+                    data-label-id={label.id}
+                    data-point-index={index}
+                  />
+                );
+              })}
             </G>
           );
         })}
@@ -409,23 +419,27 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
                   x2={point.x * scale}
                   y2={point.y * scale}
                   stroke="#2196F3"
-                  strokeWidth={2}
+                  strokeWidth={2 / viewScale}
                   strokeDasharray="5,5"
                 />
               );
             })}
             
-            {drawingPoints.map((point, index) => (
-              <Circle
-                key={`draw-point-${index}`}
-                cx={point.x * scale}
-                cy={point.y * scale}
-                r={6}
-                fill={index === 0 ? '#4CAF50' : '#2196F3'}
-                stroke="#FFFFFF"
-                strokeWidth={2}
-              />
-            ))}
+            {drawingPoints.map((point, index) => {
+              const pointRadius = 6 / viewScale;
+              const pointStrokeWidth = 2 / viewScale;
+              return (
+                <Circle
+                  key={`draw-point-${index}`}
+                  cx={point.x * scale}
+                  cy={point.y * scale}
+                  r={pointRadius}
+                  fill={index === 0 ? '#4CAF50' : '#2196F3'}
+                  stroke="#FFFFFF"
+                  strokeWidth={pointStrokeWidth}
+                />
+              );
+            })}
             
             {drawingPoints.length >= 3 && (
               <Line
@@ -434,7 +448,7 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
                 x2={drawingPoints[0].x * scale}
                 y2={drawingPoints[0].y * scale}
                 stroke="#4CAF50"
-                strokeWidth={2}
+                strokeWidth={2 / viewScale}
                 strokeDasharray="5,5"
                 opacity={0.5}
               />
@@ -451,7 +465,7 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
             height={rectPreview.height}
             fill="#2196F340"
             stroke="#2196F3"
-            strokeWidth={2}
+            strokeWidth={2 / viewScale}
             strokeDasharray="5,5"
           />
         )}
@@ -465,7 +479,7 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
             height={batchPreview.height}
             fill="#4CAF5030"
             stroke="#4CAF50"
-            strokeWidth={2}
+            strokeWidth={2 / viewScale}
             strokeDasharray="8,4"
           />
         )}
