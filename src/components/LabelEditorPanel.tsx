@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, ScrollView, Platform } from 'react-native';
-import { Label, LabelStatus, LabelPriority } from '../types';
+import { Label, LabelType } from '../types';
 
 interface LabelEditorPanelProps {
   label: Label;
@@ -9,18 +9,29 @@ interface LabelEditorPanelProps {
   onClose: () => void;
 }
 
-const STATUS_OPTIONS: { value: LabelStatus; label: string; color: string }[] = [
-  { value: 'pending', label: 'Pending', color: '#FFA500' },
-  { value: 'in_progress', label: 'In Progress', color: '#2196F3' },
-  { value: 'completed', label: 'Completed', color: '#4CAF50' },
-  { value: 'blocked', label: 'Blocked', color: '#F44336' },
+const TYPE_OPTIONS: { value: LabelType; label: string; color: string }[] = [
+  { value: 'residential', label: 'Residential', color: '#4A90D9' },
+  { value: 'commercial', label: 'Commercial', color: '#F5A623' },
+  { value: 'park', label: 'Park', color: '#7ED321' },
+  { value: 'mosque', label: 'Mosque', color: '#9B59B6' },
+  { value: 'school', label: 'School', color: '#E74C3C' },
+  { value: 'road', label: 'Road', color: '#95A5A6' },
+  { value: 'other', label: 'Other', color: '#BDC3C7' },
 ];
 
-const PRIORITY_OPTIONS: { value: LabelPriority; label: string; color: string }[] = [
-  { value: 'low', label: 'Low', color: '#8BC34A' },
-  { value: 'medium', label: 'Medium', color: '#FF9800' },
-  { value: 'high', label: 'High', color: '#F44336' },
+const COLOR_PRESETS = [
+  '#4A90D9', '#F5A623', '#7ED321', '#9B59B6', 
+  '#E74C3C', '#1ABC9C', '#3498DB', '#E91E63',
+  '#FF9800', '#795548', '#607D8B', '#00BCD4',
 ];
+
+// Get label type - handle legacy format where type might be "polygon"
+const getLabelType = (label: Label): LabelType => {
+  if (label.type && TYPE_OPTIONS.some(o => o.value === label.type)) {
+    return label.type as LabelType;
+  }
+  return 'other';
+};
 
 const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
   label,
@@ -28,12 +39,21 @@ const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
   onDelete,
   onClose,
 }) => {
-  const formatLabelName = (name: string) => {
-    return name
-      .split('_')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
+  // Calculate area from points (shoelace formula)
+  const calculateArea = (points: { x: number; y: number }[]): number => {
+    if (points.length < 3) return 0;
+    let area = 0;
+    const n = points.length;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      area += points[i].x * points[j].y;
+      area -= points[j].x * points[i].y;
+    }
+    return Math.abs(area / 2);
   };
+
+  const pixelArea = calculateArea(label.points);
+  const currentType = getLabelType(label);
 
   return (
     <View style={styles.container}>
@@ -45,35 +65,31 @@ const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Label Name */}
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Name</Text>
-          <TextInput
-            style={styles.input}
-            value={label.label}
-            onChangeText={(text) => onUpdate({ label: text.toLowerCase().replace(/\s+/g, '_') })}
-            placeholder="Enter label name"
-          />
-          <Text style={styles.hint}>Display: {formatLabelName(label.label)}</Text>
-        </View>
+        {/* Legacy label name - show if present */}
+        {label.label && (
+          <View style={styles.field}>
+            <Text style={styles.fieldLabel}>Name (Legacy)</Text>
+            <Text style={styles.legacyName}>{label.label.replace(/_/g, ' ')}</Text>
+          </View>
+        )}
 
-        {/* Status */}
+        {/* Type */}
         <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Status</Text>
+          <Text style={styles.fieldLabel}>Type</Text>
           <View style={styles.optionsRow}>
-            {STATUS_OPTIONS.map((option) => (
+            {TYPE_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
                 style={[
                   styles.optionButton,
-                  label.status === option.value && { backgroundColor: option.color },
+                  currentType === option.value && { backgroundColor: option.color },
                 ]}
-                onPress={() => onUpdate({ status: option.value })}
+                onPress={() => onUpdate({ type: option.value })}
               >
                 <Text
                   style={[
                     styles.optionText,
-                    label.status === option.value && styles.optionTextSelected,
+                    currentType === option.value && styles.optionTextSelected,
                   ]}
                 >
                   {option.label}
@@ -83,77 +99,65 @@ const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
           </View>
         </View>
 
-        {/* Priority */}
+        {/* Block Number */}
         <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Priority</Text>
-          <View style={styles.optionsRow}>
-            {PRIORITY_OPTIONS.map((option) => (
+          <Text style={styles.fieldLabel}>Block Number</Text>
+          <TextInput
+            style={styles.input}
+            value={label.blockNumber || ''}
+            onChangeText={(text) => onUpdate({ blockNumber: text })}
+            placeholder="e.g., G 01, H 15"
+          />
+        </View>
+
+        {/* House Number */}
+        <View style={styles.field}>
+          <Text style={styles.fieldLabel}>House Number</Text>
+          <TextInput
+            style={styles.input}
+            value={label.houseNumber || ''}
+            onChangeText={(text) => onUpdate({ houseNumber: text })}
+            placeholder="e.g., 123, A-5"
+          />
+        </View>
+
+        {/* Area */}
+        <View style={styles.field}>
+          <Text style={styles.fieldLabel}>Area (m²)</Text>
+          <TextInput
+            style={styles.input}
+            value={label.area?.toString() || ''}
+            onChangeText={(text) => {
+              const num = parseFloat(text);
+              onUpdate({ area: isNaN(num) ? undefined : num });
+            }}
+            placeholder="Enter area in square meters"
+            keyboardType="numeric"
+          />
+          <Text style={styles.hint}>Pixel area: {pixelArea.toFixed(0)} px²</Text>
+        </View>
+
+        {/* Color */}
+        <View style={styles.field}>
+          <Text style={styles.fieldLabel}>Color</Text>
+          <View style={styles.colorGrid}>
+            {COLOR_PRESETS.map((color) => (
               <TouchableOpacity
-                key={option.value}
+                key={color}
                 style={[
-                  styles.optionButton,
-                  label.priority === option.value && { backgroundColor: option.color },
+                  styles.colorSwatch,
+                  { backgroundColor: color },
+                  label.color === color && styles.colorSwatchSelected,
                 ]}
-                onPress={() => onUpdate({ priority: option.value })}
-              >
-                <Text
-                  style={[
-                    styles.optionText,
-                    label.priority === option.value && styles.optionTextSelected,
-                  ]}
-                >
-                  {option.label}
-                </Text>
-              </TouchableOpacity>
+                onPress={() => onUpdate({ color })}
+              />
             ))}
           </View>
-        </View>
-
-        {/* Description */}
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Description</Text>
           <TextInput
-            style={[styles.input, styles.textArea]}
-            value={label.description || ''}
-            onChangeText={(text) => onUpdate({ description: text })}
-            placeholder="Enter description"
-            multiline
-            numberOfLines={3}
-          />
-        </View>
-
-        {/* Assignee */}
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Assignee</Text>
-          <TextInput
-            style={styles.input}
-            value={label.assignee || ''}
-            onChangeText={(text) => onUpdate({ assignee: text })}
-            placeholder="Enter assignee name"
-          />
-        </View>
-
-        {/* Notes */}
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Notes</Text>
-          <TextInput
-            style={[styles.input, styles.textArea]}
-            value={label.notes || ''}
-            onChangeText={(text) => onUpdate({ notes: text })}
-            placeholder="Enter notes"
-            multiline
-            numberOfLines={3}
-          />
-        </View>
-
-        {/* Custom Color */}
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Custom Color (hex)</Text>
-          <TextInput
-            style={styles.input}
+            style={[styles.input, { marginTop: 8 }]}
             value={label.color || ''}
             onChangeText={(text) => onUpdate({ color: text })}
-            placeholder="#FF5733"
+            placeholder="Custom hex color: #FF5733"
           />
           {label.color && (
             <View style={[styles.colorPreview, { backgroundColor: label.color }]} />
@@ -164,7 +168,6 @@ const LabelEditorPanel: React.FC<LabelEditorPanelProps> = ({
         <View style={styles.infoSection}>
           <Text style={styles.infoTitle}>Info</Text>
           <Text style={styles.infoText}>ID: {label.id}</Text>
-          <Text style={styles.infoText}>Type: {label.originalType}</Text>
           <Text style={styles.infoText}>Points: {label.points.length}</Text>
           {label.createdAt && (
             <Text style={styles.infoText}>Created: {new Date(label.createdAt).toLocaleString()}</Text>
@@ -243,14 +246,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     backgroundColor: '#FAFAFA',
   },
-  textArea: {
-    minHeight: 80,
-    textAlignVertical: 'top',
-  },
   hint: {
     fontSize: 12,
     color: '#888',
     marginTop: 4,
+  },
+  legacyName: {
+    fontSize: 14,
+    color: '#666',
+    fontStyle: 'italic',
+    backgroundColor: '#F5F5F5',
+    padding: 8,
+    borderRadius: 6,
+    textTransform: 'capitalize',
   },
   optionsRow: {
     flexDirection: 'row',
@@ -272,6 +280,21 @@ const styles = StyleSheet.create({
   optionTextSelected: {
     color: '#FFFFFF',
     fontWeight: '600',
+  },
+  colorGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  colorSwatch: {
+    width: 32,
+    height: 32,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  colorSwatchSelected: {
+    borderColor: '#333',
   },
   colorPreview: {
     width: 30,

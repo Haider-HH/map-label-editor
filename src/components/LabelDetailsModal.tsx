@@ -43,7 +43,7 @@ const LabelDetailsModal: React.FC<LabelDetailsModalProps> = ({ label, visible, o
           <TouchableOpacity activeOpacity={1}>
             <View style={styles.modalContent}>
               <View style={styles.header}>
-                <Text style={styles.title}>{formatLabelName(label.label)}</Text>
+                <Text style={styles.title}>{formatLabelName(label.label || label.blockNumber || 'unknown')}</Text>
                 <TouchableOpacity onPress={onClose} style={styles.closeButton}>
                   <Text style={styles.closeButtonText}>✕</Text>
                 </TouchableOpacity>

@@ -14,6 +14,11 @@ interface EditorToolbarProps {
   drawingPointsCount: number;
   onFinishDrawing: () => void;
   onCancelDrawing: () => void;
+  // Zoom controls
+  scale: number;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onResetZoom: () => void;
 }
 
 const EditorToolbar: React.FC<EditorToolbarProps> = ({
@@ -28,41 +33,71 @@ const EditorToolbar: React.FC<EditorToolbarProps> = ({
   drawingPointsCount,
   onFinishDrawing,
   onCancelDrawing,
+  scale,
+  onZoomIn,
+  onZoomOut,
+  onResetZoom,
 }) => {
   const canFinish = drawingPointsCount >= 3;
   
-  const tools: { mode: EditorMode; icon: string; label: string }[] = [
-    { mode: 'view', icon: '👁️', label: 'View' },
-    { mode: 'edit', icon: '✏️', label: 'Edit' },
-    { mode: 'draw', icon: '✒️', label: 'Draw' },
-    { mode: 'delete', icon: '🗑️', label: 'Delete' },
+  const tools: { mode: EditorMode; icon: string; label: string; shortcut: string; tip?: string }[] = [
+    { mode: 'view', icon: '👁️', label: 'View', shortcut: 'V', tip: 'View and select labels' },
+    { mode: 'edit', icon: '✏️', label: 'Edit', shortcut: 'E', tip: 'Edit label points' },
+    { mode: 'draw', icon: '✒️', label: 'Polygon', shortcut: 'P', tip: 'Draw polygon labels' },
+    { mode: 'draw-rect', icon: '⬜', label: 'Rect', shortcut: 'R', tip: 'Quick rectangle drawing' },
+    { mode: 'batch', icon: '⊞', label: 'Batch', shortcut: 'B', tip: 'Create multiple labels at once' },
+    { mode: 'delete', icon: '🗑️', label: 'Delete', shortcut: 'D', tip: 'Delete labels' },
   ];
 
   return (
     <View style={styles.container}>
-      <View style={styles.toolsSection}>
-        <Text style={styles.sectionLabel}>Tools</Text>
-        <View style={styles.toolsRow}>
-          {tools.map((tool) => (
-            <TouchableOpacity
-              key={tool.mode}
-              style={[
-                styles.toolButton,
-                mode === tool.mode && styles.toolButtonActive,
-              ]}
-              onPress={() => onModeChange(tool.mode)}
-            >
-              <Text style={styles.toolIcon}>{tool.icon}</Text>
-              <Text
+      <View style={styles.topRow}>
+        <View style={styles.toolsSection}>
+          <Text style={styles.sectionLabel}>Tools (press key to switch)</Text>
+          <View style={styles.toolsRow}>
+            {tools.map((tool) => (
+              <TouchableOpacity
+                key={tool.mode}
                 style={[
-                  styles.toolLabel,
-                  mode === tool.mode && styles.toolLabelActive,
+                  styles.toolButton,
+                  mode === tool.mode && styles.toolButtonActive,
                 ]}
+                onPress={() => onModeChange(tool.mode)}
+                // @ts-ignore web specific
+                title={`${tool.tip} (${tool.shortcut})`}
               >
-                {tool.label}
-              </Text>
+                <Text style={styles.toolIcon}>{tool.icon}</Text>
+                <Text
+                  style={[
+                    styles.toolLabel,
+                    mode === tool.mode && styles.toolLabelActive,
+                  ]}
+                >
+                  {tool.label}
+                </Text>
+                <Text style={[styles.shortcutKey, mode === tool.mode && styles.shortcutKeyActive]}>
+                  {tool.shortcut}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        {/* Zoom Controls */}
+        <View style={styles.zoomSection}>
+          <Text style={styles.sectionLabel}>Zoom ({Math.round(scale * 100)}%) · Scroll or Ctrl+/-</Text>
+          <View style={styles.zoomRow}>
+            <TouchableOpacity style={styles.zoomButton} onPress={onZoomOut}>
+              <Text style={styles.zoomButtonText}>−</Text>
             </TouchableOpacity>
-          ))}
+            <TouchableOpacity style={styles.zoomButton} onPress={onResetZoom}>
+              <Text style={styles.zoomButtonTextSmall}>Reset</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.zoomButton} onPress={onZoomIn}>
+              <Text style={styles.zoomButtonText}>+</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.zoomHint}>Scroll to zoom • Drag to pan</Text>
         </View>
       </View>
 
@@ -80,10 +115,26 @@ const EditorToolbar: React.FC<EditorToolbarProps> = ({
             >
               <Text style={styles.finishButtonText}>✓ Finish ({drawingPointsCount}/3+)</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.cancelButton} onPress={onCancelDrawing}>
+            <TouchableOpacity style={styles.cancelDrawButton} onPress={onCancelDrawing}>
               <Text style={styles.cancelButtonText}>✕ Cancel</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      )}
+
+      {mode === 'draw-rect' && (
+        <View style={styles.drawingSection}>
+          <Text style={styles.drawingHint}>
+            Click and drag on the image to draw a rectangle. Release to create the label.
+          </Text>
+        </View>
+      )}
+
+      {mode === 'batch' && (
+        <View style={styles.batchSection}>
+          <Text style={styles.drawingHint}>
+            Click and drag to select an area, then configure the grid to create multiple labels at once.
+          </Text>
         </View>
       )}
 
@@ -136,8 +187,14 @@ const styles = StyleSheet.create({
       elevation: 3,
     }),
   },
-  toolsSection: {
+  topRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
     marginBottom: 12,
+  },
+  toolsSection: {
+    flex: 1,
   },
   sectionLabel: {
     fontSize: 11,
@@ -149,6 +206,7 @@ const styles = StyleSheet.create({
   toolsRow: {
     flexDirection: 'row',
     gap: 8,
+    flexWrap: 'wrap',
   },
   toolButton: {
     flexDirection: 'row',
@@ -176,8 +234,59 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '600',
   },
+  shortcutKey: {
+    fontSize: 10,
+    color: '#999',
+    marginLeft: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    backgroundColor: '#E0E0E0',
+    borderRadius: 3,
+    fontWeight: '600',
+  },
+  shortcutKeyActive: {
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    color: '#FFFFFF',
+  },
+  zoomSection: {
+    alignItems: 'flex-end',
+  },
+  zoomRow: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  zoomButton: {
+    width: 40,
+    height: 32,
+    backgroundColor: '#F5F5F5',
+    borderRadius: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+  },
+  zoomButtonText: {
+    fontSize: 20,
+    color: '#333',
+    fontWeight: '600',
+  },
+  zoomButtonTextSmall: {
+    fontSize: 11,
+    color: '#666',
+  },
+  zoomHint: {
+    fontSize: 10,
+    color: '#999',
+    marginTop: 4,
+  },
   drawingSection: {
     backgroundColor: '#E3F2FD',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  batchSection: {
+    backgroundColor: '#E8F5E9',
     padding: 12,
     borderRadius: 8,
     marginBottom: 12,
@@ -205,7 +314,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '600',
   },
-  cancelButton: {
+  cancelDrawButton: {
     backgroundColor: '#F44336',
     paddingHorizontal: 16,
     paddingVertical: 8,

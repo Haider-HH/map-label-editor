@@ -3,24 +3,22 @@ export interface Point {
   y: number;
 }
 
-export type LabelStatus = 'pending' | 'in_progress' | 'completed' | 'blocked';
-export type LabelPriority = 'low' | 'medium' | 'high';
+export type LabelType = 'residential' | 'commercial' | 'park' | 'mosque' | 'school' | 'road' | 'other';
 
 export interface Label {
   id: string;
-  label: string;
-  type: string;
+  type: LabelType | string; // string allows legacy "polygon" type
   points: Point[];
-  originalType: string;
-  // Editable fields
-  status?: LabelStatus;
-  description?: string;
-  color?: string;
-  priority?: LabelPriority;
-  assignee?: string;
-  notes?: string;
+  // Properties specific to plot/site maps
+  area?: number; // in square meters
+  color?: string; // hex color
+  blockNumber?: string; // e.g., "G 01", "H 15"
+  houseNumber?: string; // e.g., "123", "A-5"
   createdAt?: string;
   updatedAt?: string;
+  // Legacy fields for backward compatibility
+  label?: string; // old field name
+  originalType?: string;
 }
 
 export interface ImageData {
@@ -37,7 +35,7 @@ export interface LabelsData {
   };
 }
 
-export type EditorMode = 'view' | 'edit' | 'draw' | 'delete';
+export type EditorMode = 'view' | 'edit' | 'draw' | 'draw-rect' | 'delete' | 'batch';
 
 export interface EditorState {
   mode: EditorMode;
@@ -45,4 +43,21 @@ export interface EditorState {
   selectedPointIndex: number | null;
   isDrawing: boolean;
   drawingPoints: Point[];
+}
+
+// For batch creation
+export interface BatchConfig {
+  rows: number;
+  cols: number;
+  startBlockNumber: string;
+  startHouseNumber: number;
+  type: LabelType;
+  color: string;
+}
+
+// For zoom/pan
+export interface ViewState {
+  scale: number;
+  translateX: number;
+  translateY: number;
 }

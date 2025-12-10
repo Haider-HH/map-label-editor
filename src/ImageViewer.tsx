@@ -85,11 +85,11 @@ const ImageViewer: React.FC = () => {
               <View 
                 style={[
                   styles.legendColor, 
-                  { backgroundColor: getLabelColor(label.label) }
+                  { backgroundColor: getLabelColor(label.label || label.blockNumber || 'unknown') }
                 ]} 
               />
               <Text style={styles.legendText}>
-                {formatLabelName(label.label)}
+                {formatLabelName(label.label || label.blockNumber || 'unknown')}
               </Text>
             </View>
           ))}

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,7 +15,16 @@ import EditorToolbar from './components/EditorToolbar';
 import ImageSelector from './components/ImageSelector';
 import NewLabelModal from './components/NewLabelModal';
 import AddImageModal from './components/AddImageModal';
-import { Label, LabelsData, EditorMode, Point, ImageData } from './types';
+import BatchLabelModal, { BatchConfig } from './components/BatchLabelModal';
+import { Label, LabelsData, EditorMode, Point, ImageData, LabelType } from './types';
+
+// Import Tesseract for OCR (web only)
+let Tesseract: any = null;
+if (Platform.OS === 'web') {
+  import('tesseract.js').then(module => {
+    Tesseract = module;
+  });
+}
 
 // Import assets
 const constructionImage = require('../assets/Construction-Site-Plan-768x458.png');
@@ -23,6 +32,266 @@ const initialLabelsData: LabelsData = require('../assets/merged-labels.json');
 
 // Store for uploaded images (in-memory for web)
 const uploadedImages: { [key: string]: any } = {};
+
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 10;
+const SCALE_STEP = 0.1;
+
+// Utility to sample dominant color from an image region (web only)
+const sampleColorFromRegion = async (
+  imageSource: any,
+  points: Point[],
+  imageWidth: number,
+  imageHeight: number
+): Promise<string | null> => {
+  if (Platform.OS !== 'web') return null;
+  
+  try {
+    // Get bounding box of the polygon
+    const minX = Math.max(0, Math.floor(Math.min(...points.map(p => p.x))));
+    const maxX = Math.min(imageWidth, Math.ceil(Math.max(...points.map(p => p.x))));
+    const minY = Math.max(0, Math.floor(Math.min(...points.map(p => p.y))));
+    const maxY = Math.min(imageHeight, Math.ceil(Math.max(...points.map(p => p.y))));
+    
+    const width = maxX - minX;
+    const height = maxY - minY;
+    
+    if (width <= 0 || height <= 0) return null;
+    
+    // Create canvas and load image
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    
+    canvas.width = imageWidth;
+    canvas.height = imageHeight;
+    
+    // Load the image
+    const img = new window.Image();
+    img.crossOrigin = 'anonymous';
+    
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Failed to load image'));
+      
+      // Handle different image source types
+      if (typeof imageSource === 'string') {
+        img.src = imageSource;
+      } else if (imageSource?.uri) {
+        img.src = imageSource.uri;
+      } else if (typeof imageSource === 'number') {
+        // For require() assets, we need to get the resolved URI
+        // This is tricky - for now, return null for bundled assets
+        resolve();
+        return;
+      } else {
+        resolve();
+        return;
+      }
+    });
+    
+    if (!img.complete || img.naturalWidth === 0) return null;
+    
+    // Draw image to canvas
+    ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
+    
+    // Sample pixels from the region
+    const imageData = ctx.getImageData(minX, minY, width, height);
+    const pixels = imageData.data;
+    
+    // Calculate average color (skip transparent pixels)
+    let r = 0, g = 0, b = 0, count = 0;
+    
+    // Sample every 4th pixel for performance
+    for (let i = 0; i < pixels.length; i += 16) {
+      const alpha = pixels[i + 3];
+      if (alpha > 128) { // Only count non-transparent pixels
+        r += pixels[i];
+        g += pixels[i + 1];
+        b += pixels[i + 2];
+        count++;
+      }
+    }
+    
+    if (count === 0) return null;
+    
+    r = Math.round(r / count);
+    g = Math.round(g / count);
+    b = Math.round(b / count);
+    
+    // Convert to hex
+    const toHex = (n: number) => n.toString(16).padStart(2, '0');
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  } catch (error) {
+    console.warn('Failed to sample color from image:', error);
+    return null;
+  }
+};
+
+// Extract area (numeric value in sq meters) from a cell region using OCR
+// Distinguishes area values from house numbers based on context
+const extractAreaFromRegion = async (
+  imageSource: any,
+  points: Point[],
+  imageWidth: number,
+  imageHeight: number,
+  expectedHouseNumber?: number
+): Promise<number | null> => {
+  if (Platform.OS !== 'web' || !Tesseract) return null;
+  
+  try {
+    // Get bounding box of the polygon
+    const minX = Math.max(0, Math.floor(Math.min(...points.map(p => p.x))));
+    const maxX = Math.min(imageWidth, Math.ceil(Math.max(...points.map(p => p.x))));
+    const minY = Math.max(0, Math.floor(Math.min(...points.map(p => p.y))));
+    const maxY = Math.min(imageHeight, Math.ceil(Math.max(...points.map(p => p.y))));
+    
+    const width = maxX - minX;
+    const height = maxY - minY;
+    
+    if (width <= 0 || height <= 0) return null;
+    
+    // Create canvas and load image
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    
+    // Load the image
+    const img = new window.Image();
+    img.crossOrigin = 'anonymous';
+    
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Failed to load image'));
+      
+      if (typeof imageSource === 'string') {
+        img.src = imageSource;
+      } else if (imageSource?.uri) {
+        img.src = imageSource.uri;
+      } else {
+        resolve();
+        return;
+      }
+    });
+    
+    if (!img.complete || img.naturalWidth === 0) return null;
+    
+    // Scale up the cell region for better OCR accuracy
+    const scaleFactor = 2;
+    canvas.width = width * scaleFactor;
+    canvas.height = height * scaleFactor;
+    
+    // Apply some preprocessing for better OCR
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, minX, minY, width, height, 0, 0, width * scaleFactor, height * scaleFactor);
+    
+    // Convert to data URL for Tesseract
+    const dataUrl = canvas.toDataURL('image/png');
+    
+    // Run OCR with better settings
+    const result = await Tesseract.recognize(dataUrl, 'eng', {
+      logger: () => {}, // Suppress logs
+    });
+    
+    const text = result.data.text;
+    const words = result.data.words || [];
+    
+    // Collect all numbers found with their properties
+    const foundNumbers: { value: number; hasDecimal: boolean; hasUnit: boolean; fontSize: number; text: string }[] = [];
+    
+    // Look for numbers with units first (most reliable for area)
+    const unitPatterns = [
+      /(\d+\.?\d*)\s*(?:m²|m2|sqm|sq\.?\s*m|square\s*m)/gi,
+      /(\d+\.?\d*)\s*(?:م²|متر)/gi,
+    ];
+    
+    for (const pattern of unitPatterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const value = parseFloat(match[1]);
+        if (value >= 50 && value <= 10000) {
+          foundNumbers.push({ 
+            value, 
+            hasDecimal: match[1].includes('.'), 
+            hasUnit: true, 
+            fontSize: 0,
+            text: match[0]
+          });
+        }
+      }
+    }
+    
+    // If we found a number with units, use it
+    if (foundNumbers.length > 0 && foundNumbers.some(n => n.hasUnit)) {
+      const withUnit = foundNumbers.find(n => n.hasUnit);
+      if (withUnit) return withUnit.value;
+    }
+    
+    // Look for decimal numbers (likely area, not house number)
+    const decimalPattern = /(\d+\.\d+)/g;
+    let match;
+    while ((match = decimalPattern.exec(text)) !== null) {
+      const value = parseFloat(match[1]);
+      // Decimal numbers between 50-10000 are likely area values
+      if (value >= 50 && value <= 10000) {
+        foundNumbers.push({ 
+          value, 
+          hasDecimal: true, 
+          hasUnit: false, 
+          fontSize: 0,
+          text: match[0]
+        });
+      }
+    }
+    
+    // If we found decimal numbers, prefer them (area values often have decimals)
+    if (foundNumbers.length > 0 && foundNumbers.some(n => n.hasDecimal)) {
+      const withDecimal = foundNumbers.find(n => n.hasDecimal);
+      if (withDecimal) return withDecimal.value;
+    }
+    
+    // Look for whole numbers, but filter out likely house numbers
+    const wholeNumberPattern = /\b(\d{2,4})\b/g;
+    while ((match = wholeNumberPattern.exec(text)) !== null) {
+      const value = parseInt(match[1], 10);
+      
+      // Skip if this looks like the house number
+      if (expectedHouseNumber !== undefined) {
+        // Skip if it matches the expected house number or is very close
+        if (Math.abs(value - expectedHouseNumber) <= 2) {
+          continue;
+        }
+      }
+      
+      // Area values are typically:
+      // - Between 100-10000 sq meters for residential plots
+      // - House numbers are typically 1-999
+      // So prefer numbers >= 100 as potential areas
+      if (value >= 100 && value <= 10000) {
+        foundNumbers.push({ 
+          value, 
+          hasDecimal: false, 
+          hasUnit: false, 
+          fontSize: 0,
+          text: match[0]
+        });
+      }
+    }
+    
+    // If we have candidates, return the largest one (area is usually bigger than house number)
+    if (foundNumbers.length > 0) {
+      // Sort by value descending and return the largest
+      foundNumbers.sort((a, b) => b.value - a.value);
+      return foundNumbers[0].value;
+    }
+    
+    return null;
+  } catch (error) {
+    console.warn('Failed to extract area from image:', error);
+    return null;
+  }
+};
 
 const LabelEditor: React.FC = () => {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -35,37 +304,73 @@ const LabelEditor: React.FC = () => {
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
   const [showNewLabelModal, setShowNewLabelModal] = useState(false);
   const [showAddImageModal, setShowAddImageModal] = useState(false);
+  const [showBatchModal, setShowBatchModal] = useState(false);
   const [history, setHistory] = useState<LabelsData[]>([]);
+  
+  // Rectangle drawing state
+  const [rectStart, setRectStart] = useState<Point | null>(null);
+  const [rectEnd, setRectEnd] = useState<Point | null>(null);
+  
+  // Batch selection state
+  const [batchSelectionRect, setBatchSelectionRect] = useState<{ start: Point; end: Point } | null>(null);
+  
+  // Zoom/pan state
+  const [viewScale, setViewScale] = useState(1);
+  const [viewTranslateX, setViewTranslateX] = useState(0);
+  const [viewTranslateY, setViewTranslateY] = useState(0);
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState<{ x: number; y: number; translateX: number; translateY: number } | null>(null);
+  const [spacePressed, setSpacePressed] = useState(false);
+  
+  const scrollViewRef = useRef<ScrollView>(null);
+  const containerRef = useRef<View>(null);
 
   const imageData = labelsData.images[selectedImageKey];
   const selectedLabel = selectedLabelId 
     ? imageData?.labels.find(l => l.id === selectedLabelId) 
     : null;
 
-  // Calculate scale
+  // Calculate base scale to fit in viewport
   const padding = 40;
-  const toolbarHeight = 180;
+  const toolbarHeight = 200;
   const maxWidth = windowWidth - padding * 2 - (selectedLabel ? 340 : 0);
   const maxHeight = windowHeight - toolbarHeight - 100;
 
-  const scaleX = maxWidth / (imageData?.width || 768);
-  const scaleY = maxHeight / (imageData?.height || 458);
-  const scale = Math.min(scaleX, scaleY, 1.5);
+  const baseScaleX = maxWidth / (imageData?.width || 768);
+  const baseScaleY = maxHeight / (imageData?.height || 458);
+  const baseScale = Math.min(baseScaleX, baseScaleY, 1);
+
+  // Combined scale (base fit * user zoom)
+  const scale = baseScale * viewScale;
 
   const scaledWidth = (imageData?.width || 768) * scale;
   const scaledHeight = (imageData?.height || 458) * scale;
 
   // Get image source
-  const getImageSource = () => {
+  const getImageSource = useCallback(() => {
     if (imageData?.imageUri) {
       return { uri: imageData.imageUri };
     }
-    // For the default bundled image
     if (selectedImageKey === 'Construction-Site-Plan-768x458.png') {
       return constructionImage;
     }
     return uploadedImages[selectedImageKey] || constructionImage;
-  };
+  }, [imageData?.imageUri, selectedImageKey]);
+
+  // Zoom controls
+  const handleZoomIn = useCallback(() => {
+    setViewScale(prev => Math.min(prev + SCALE_STEP, MAX_SCALE));
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    setViewScale(prev => Math.max(prev - SCALE_STEP, MIN_SCALE));
+  }, []);
+
+  const handleResetZoom = useCallback(() => {
+    setViewScale(1);
+    setViewTranslateX(0);
+    setViewTranslateY(0);
+  }, []);
 
   // Save to history for undo
   const saveHistory = useCallback(() => {
@@ -80,6 +385,190 @@ const LabelEditor: React.FC = () => {
       setHistory(prev => prev.slice(0, -1));
     }
   }, [history]);
+
+  // Wheel zoom handler for web - zoom towards cursor
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const handleWheel = (e: WheelEvent) => {
+      // Only handle when over the image area
+      const target = e.target as HTMLElement;
+      const container = target.closest('[data-image-container="true"]') as HTMLElement;
+      if (!container) return;
+
+      e.preventDefault();
+      
+      // Get cursor position relative to the container
+      const rect = container.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const cursorY = e.clientY - rect.top;
+      
+      // Calculate the point on the image under the cursor (in image coordinates)
+      const imageX = (cursorX - viewTranslateX) / viewScale;
+      const imageY = (cursorY - viewTranslateY) / viewScale;
+      
+      // Calculate new scale
+      const delta = e.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
+      const newScale = Math.min(Math.max(viewScale + delta, MIN_SCALE), MAX_SCALE);
+      
+      if (newScale === viewScale) return;
+      
+      // Calculate new translate to keep the cursor point stationary
+      const newTranslateX = cursorX - imageX * newScale;
+      const newTranslateY = cursorY - imageY * newScale;
+      
+      setViewScale(newScale);
+      setViewTranslateX(newTranslateX);
+      setViewTranslateY(newTranslateY);
+    };
+
+    document.addEventListener('wheel', handleWheel, { passive: false });
+    return () => document.removeEventListener('wheel', handleWheel);
+  }, [viewScale, viewTranslateX, viewTranslateY]);
+
+  // Panning with middle mouse or space+drag
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-image-container="true"]')) return;
+      
+      // Middle mouse button or space+left click for panning
+      if (e.button === 1 || (spacePressed && e.button === 0)) {
+        e.preventDefault();
+        setIsPanning(true);
+        setPanStart({ 
+          x: e.clientX, 
+          y: e.clientY, 
+          translateX: viewTranslateX, 
+          translateY: viewTranslateY 
+        });
+      }
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isPanning || !panStart) return;
+      
+      const dx = e.clientX - panStart.x;
+      const dy = e.clientY - panStart.y;
+      
+      setViewTranslateX(panStart.translateX + dx);
+      setViewTranslateY(panStart.translateY + dy);
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      if (e.button === 1 || e.button === 0) {
+        setIsPanning(false);
+        setPanStart(null);
+      }
+    };
+
+    document.addEventListener('mousedown', handleMouseDown);
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isPanning, panStart, spacePressed, viewTranslateX, viewTranslateY]);
+
+  // Keyboard shortcuts for web
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't handle if typing in an input
+      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') {
+        return;
+      }
+
+      // Space for panning
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        setSpacePressed(true);
+        return;
+      }
+
+      switch (e.key.toLowerCase()) {
+        case 'v':
+          setMode('view');
+          break;
+        case 'e':
+          setMode('edit');
+          break;
+        case 'p':
+          setMode('draw'); // Polygon
+          break;
+        case 'r':
+          setMode('draw-rect'); // Rectangle
+          break;
+        case 'b':
+          setMode('batch');
+          break;
+        case 'd':
+          if (!selectedLabelId) {
+            setMode('delete');
+          }
+          break;
+        case 'escape':
+          setDrawingPoints([]);
+          setRectStart(null);
+          setRectEnd(null);
+          setBatchSelectionRect(null);
+          setSelectedLabelId(null);
+          setMode('view');
+          break;
+        case 'z':
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            handleUndo();
+          }
+          break;
+        case '=':
+        case '+':
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            handleZoomIn();
+          }
+          break;
+        case '-':
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            handleZoomOut();
+          }
+          break;
+        case '0':
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            handleResetZoom();
+          }
+          break;
+        case 'enter':
+          if (mode === 'draw' && drawingPoints.length >= 3) {
+            setShowNewLabelModal(true);
+          }
+          break;
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === ' ' || e.code === 'Space') {
+        setSpacePressed(false);
+        setIsPanning(false);
+        setPanStart(null);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [mode, selectedLabelId, drawingPoints.length, handleUndo, handleZoomIn, handleZoomOut, handleResetZoom]);
 
   // Update label
   const handleUpdateLabel = useCallback((updates: Partial<Label>) => {
@@ -166,10 +655,69 @@ const LabelEditor: React.FC = () => {
   // Handle canvas click for drawing
   const handleCanvasClick = useCallback((point: Point) => {
     if (mode === 'draw') {
-      console.log('Canvas clicked at:', point);
       setDrawingPoints(prev => [...prev, point]);
     }
   }, [mode]);
+
+  // Rectangle drawing handlers
+  const handleRectDrawStart = useCallback((point: Point) => {
+    setRectStart(point);
+    setRectEnd(point);
+  }, []);
+
+  const handleRectDrawMove = useCallback((point: Point) => {
+    if (rectStart) {
+      setRectEnd(point);
+    }
+  }, [rectStart]);
+
+  const handleRectDrawEnd = useCallback((point: Point) => {
+    if (rectStart && rectEnd) {
+      const minX = Math.min(rectStart.x, point.x);
+      const maxX = Math.max(rectStart.x, point.x);
+      const minY = Math.min(rectStart.y, point.y);
+      const maxY = Math.max(rectStart.y, point.y);
+      
+      // Only create if it has some size
+      if (maxX - minX > 5 && maxY - minY > 5) {
+        setDrawingPoints([
+          { x: minX, y: minY },
+          { x: maxX, y: minY },
+          { x: maxX, y: maxY },
+          { x: minX, y: maxY },
+        ]);
+        setShowNewLabelModal(true);
+      }
+    }
+    setRectStart(null);
+    setRectEnd(null);
+  }, [rectStart, rectEnd]);
+
+  // Batch selection handlers
+  const handleBatchSelectionStart = useCallback((point: Point) => {
+    setBatchSelectionRect({ start: point, end: point });
+  }, []);
+
+  const handleBatchSelectionMove = useCallback((point: Point) => {
+    if (batchSelectionRect) {
+      setBatchSelectionRect(prev => prev ? { ...prev, end: point } : null);
+    }
+  }, [batchSelectionRect]);
+
+  const handleBatchSelectionEnd = useCallback((start: Point, end: Point) => {
+    const minX = Math.min(start.x, end.x);
+    const maxX = Math.max(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const maxY = Math.max(start.y, end.y);
+    
+    // Only show modal if it has some size
+    if (maxX - minX > 20 && maxY - minY > 20) {
+      setBatchSelectionRect({ start: { x: minX, y: minY }, end: { x: maxX, y: maxY } });
+      setShowBatchModal(true);
+    } else {
+      setBatchSelectionRect(null);
+    }
+  }, []);
 
   // Finish drawing
   const handleFinishDrawing = useCallback(() => {
@@ -181,24 +729,34 @@ const LabelEditor: React.FC = () => {
   // Cancel drawing
   const handleCancelDrawing = useCallback(() => {
     setDrawingPoints([]);
+    setRectStart(null);
+    setRectEnd(null);
+    setBatchSelectionRect(null);
     setMode('view');
   }, []);
 
   // Create new label from drawing
-  const handleCreateLabel = useCallback((labelName: string) => {
+  const handleCreateLabel = useCallback((labelData: {
+    type: LabelType;
+    blockNumber: string;
+    houseNumber: string;
+    color: string;
+    area?: number;
+  }) => {
     if (drawingPoints.length < 3) return;
     
     saveHistory();
-    const newId = `${labelName}_${Date.now()}`;
+    const newId = `${labelData.type}_${labelData.blockNumber || ''}_${Date.now()}`.replace(/\s+/g, '_');
     const closedPoints = [...drawingPoints, drawingPoints[0]]; // Close the polygon
     
     const newLabel: Label = {
       id: newId,
-      label: labelName,
-      type: 'polygon',
+      type: labelData.type,
       points: closedPoints,
-      originalType: 'polygon',
-      status: 'pending',
+      blockNumber: labelData.blockNumber || undefined,
+      houseNumber: labelData.houseNumber || undefined,
+      color: labelData.color,
+      area: labelData.area,
       createdAt: new Date().toISOString(),
     };
 
@@ -217,6 +775,158 @@ const LabelEditor: React.FC = () => {
     setMode('view');
     setSelectedLabelId(newId);
   }, [drawingPoints, selectedImageKey, saveHistory]);
+
+  // Create batch labels
+  const handleCreateBatchLabels = useCallback(async (config: BatchConfig) => {
+    if (!batchSelectionRect) return;
+    
+    saveHistory();
+    
+    const { start, end } = batchSelectionRect;
+    const width = end.x - start.x;
+    const height = end.y - start.y;
+    const cellWidth = width / config.cols;
+    const cellHeight = height / config.rows;
+    
+    // Calculate house number for each cell position based on numbering order
+    const getHouseNumber = (row: number, col: number): number => {
+      const { rows, cols, startHouseNumber, numberingOrder } = config;
+      
+      switch (numberingOrder) {
+        case 'ltr':
+          // Left to right, top to bottom: 1 2 3 4 5 / 6 7 8 9 10
+          return startHouseNumber + row * cols + col;
+          
+        case 'rtl':
+          // Right to left, top to bottom: 5 4 3 2 1 / 10 9 8 7 6
+          return startHouseNumber + row * cols + (cols - 1 - col);
+          
+        case 'boustrophedon':
+          // Alternating snake pattern: 1 2 3 4 5 / 10 9 8 7 6
+          if (row % 2 === 0) {
+            return startHouseNumber + row * cols + col;
+          } else {
+            return startHouseNumber + row * cols + (cols - 1 - col);
+          }
+          
+        case 'evens-odds':
+          // Evens on first row, odds on second: 2 4 6 8 10 / 1 3 5 7 9
+          // Even numbers: 2, 4, 6, ... on row 0
+          // Odd numbers: 1, 3, 5, ... on row 1
+          if (rows === 2) {
+            if (row === 0) {
+              // Even numbers starting from startHouseNumber (if even) or startHouseNumber+1
+              const firstEven = startHouseNumber % 2 === 0 ? startHouseNumber : startHouseNumber + 1;
+              return firstEven + col * 2;
+            } else {
+              // Odd numbers
+              const firstOdd = startHouseNumber % 2 === 1 ? startHouseNumber : startHouseNumber + 1;
+              return firstOdd + col * 2;
+            }
+          }
+          // For more than 2 rows, fall back to regular pattern
+          return startHouseNumber + row * cols + col;
+          
+        case 'odds-evens':
+          // Odds on first row, evens on second: 1 3 5 7 9 / 2 4 6 8 10
+          if (rows === 2) {
+            if (row === 0) {
+              // Odd numbers
+              const firstOdd = startHouseNumber % 2 === 1 ? startHouseNumber : startHouseNumber + 1;
+              return firstOdd + col * 2;
+            } else {
+              // Even numbers
+              const firstEven = startHouseNumber % 2 === 0 ? startHouseNumber : startHouseNumber + 1;
+              return firstEven + col * 2;
+            }
+          }
+          // For more than 2 rows, fall back to regular pattern
+          return startHouseNumber + row * cols + col;
+          
+        case 'col-ltr':
+          // Column by column, left to right: 1 3 5 / 2 4 6
+          return startHouseNumber + col * rows + row;
+          
+        case 'col-rtl':
+          // Column by column, right to left
+          return startHouseNumber + (cols - 1 - col) * rows + row;
+          
+        default:
+          return startHouseNumber + row * cols + col;
+      }
+    };
+    
+    const newLabels: Label[] = [];
+    const imgSource = getImageSource();
+    const imgWidth = imageData?.width || 768;
+    const imgHeight = imageData?.height || 458;
+    
+    for (let row = 0; row < config.rows; row++) {
+      for (let col = 0; col < config.cols; col++) {
+        const cellX = start.x + col * cellWidth;
+        const cellY = start.y + row * cellHeight;
+        
+        const currentHouseNum = getHouseNumber(row, col);
+        
+        // Get cell polygon points
+        const cellPoints = [
+          { x: cellX, y: cellY },
+          { x: cellX + cellWidth, y: cellY },
+          { x: cellX + cellWidth, y: cellY + cellHeight },
+          { x: cellX, y: cellY + cellHeight },
+        ];
+        
+        // Auto-detect color if enabled
+        let labelColor = config.color;
+        if (config.autoDetectColor && Platform.OS === 'web') {
+          const detectedColor = await sampleColorFromRegion(imgSource, cellPoints, imgWidth, imgHeight);
+          if (detectedColor) {
+            labelColor = detectedColor;
+          }
+        }
+        
+        // Auto-detect area using OCR if enabled
+        // Pass the expected house number so we can filter it out
+        let detectedArea: number | undefined;
+        if (config.autoDetectArea && Platform.OS === 'web') {
+          const area = await extractAreaFromRegion(imgSource, cellPoints, imgWidth, imgHeight, currentHouseNum);
+          if (area !== null) {
+            detectedArea = area;
+          }
+        }
+        
+        const newLabel: Label = {
+          id: `${config.type}_${config.startBlockNumber}_${currentHouseNum}_${Date.now()}_${row}_${col}`.replace(/\s+/g, '_'),
+          type: config.type,
+          points: [
+            ...cellPoints,
+            cellPoints[0], // Close polygon
+          ],
+          blockNumber: config.startBlockNumber,
+          houseNumber: String(currentHouseNum),
+          color: labelColor,
+          area: detectedArea,
+          createdAt: new Date().toISOString(),
+        };
+        
+        newLabels.push(newLabel);
+      }
+    }
+
+    setLabelsData(prev => ({
+      ...prev,
+      images: {
+        ...prev.images,
+        [selectedImageKey]: {
+          ...prev.images[selectedImageKey],
+          labels: [...prev.images[selectedImageKey].labels, ...newLabels],
+        },
+      },
+    }));
+
+    setBatchSelectionRect(null);
+    setMode('view');
+  }, [batchSelectionRect, selectedImageKey, saveHistory, getImageSource, imageData]);
 
   // Handle label press
   const handleLabelPress = useCallback((label: Label) => {
@@ -250,7 +960,8 @@ const LabelEditor: React.FC = () => {
 
     setSelectedImageKey(key);
     setSelectedLabelId(null);
-  }, [saveHistory]);
+    handleResetZoom();
+  }, [saveHistory, handleResetZoom]);
 
   // Delete image
   const handleDeleteImage = useCallback((imageKey: string) => {
@@ -316,6 +1027,7 @@ const LabelEditor: React.FC = () => {
                 setLabelsData(data);
                 setSelectedImageKey(Object.keys(data.images)[0]);
                 setSelectedLabelId(null);
+                handleResetZoom();
               }
             } catch (error) {
               window.alert('Invalid JSON file');
@@ -326,14 +1038,21 @@ const LabelEditor: React.FC = () => {
       };
       input.click();
     }
-  }, [saveHistory]);
+  }, [saveHistory, handleResetZoom]);
 
   // Mode change
   const handleModeChange = useCallback((newMode: EditorMode) => {
     if (newMode !== 'draw') {
       setDrawingPoints([]);
     }
-    if (newMode === 'draw' || newMode === 'delete') {
+    if (newMode !== 'draw-rect') {
+      setRectStart(null);
+      setRectEnd(null);
+    }
+    if (newMode !== 'batch') {
+      setBatchSelectionRect(null);
+    }
+    if (newMode === 'draw' || newMode === 'delete' || newMode === 'draw-rect' || newMode === 'batch') {
       setSelectedLabelId(null);
     }
     setMode(newMode);
@@ -353,6 +1072,10 @@ const LabelEditor: React.FC = () => {
         drawingPointsCount={drawingPoints.length}
         onFinishDrawing={handleFinishDrawing}
         onCancelDrawing={handleCancelDrawing}
+        scale={viewScale}
+        onZoomIn={handleZoomIn}
+        onZoomOut={handleZoomOut}
+        onResetZoom={handleResetZoom}
       />
 
       <ImageSelector
@@ -361,14 +1084,19 @@ const LabelEditor: React.FC = () => {
         onSelectImage={(key) => {
           setSelectedImageKey(key);
           setSelectedLabelId(null);
+          handleResetZoom();
         }}
         onDeleteImage={handleDeleteImage}
       />
 
       <View style={styles.mainContent}>
         <ScrollView
+          ref={scrollViewRef}
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
+          horizontal={false}
+          showsVerticalScrollIndicator={true}
+          showsHorizontalScrollIndicator={true}
         >
           <View style={styles.header}>
             <Text style={styles.title}>{imageData?.name || 'Image Viewer'}</Text>
@@ -376,32 +1104,75 @@ const LabelEditor: React.FC = () => {
               {mode === 'view' && 'Hover to highlight • Click to view details'}
               {mode === 'edit' && 'Click a label to edit • Drag points to reshape'}
               {mode === 'draw' && 'Click to add points • Min 3 points required'}
+              {mode === 'draw-rect' && 'Click and drag to draw a rectangle'}
+              {mode === 'batch' && 'Select an area to create multiple labels'}
               {mode === 'delete' && 'Click a label to delete it'}
             </Text>
             <Text style={styles.info}>
-              {imageData?.labels.length || 0} labels • {imageData?.width}×{imageData?.height}px
+              {imageData?.labels.length || 0} labels • {imageData?.width}×{imageData?.height}px • Zoom: {Math.round(viewScale * 100)}%
             </Text>
           </View>
 
-          <View style={[styles.imageContainer, { width: scaledWidth, height: scaledHeight }]}>
-            <Image
-              source={getImageSource()}
-              style={[styles.image, { width: scaledWidth, height: scaledHeight }]}
-              resizeMode="contain"
-            />
-            <LabelOverlay
-              labels={imageData?.labels || []}
-              imageWidth={imageData?.width || 768}
-              imageHeight={imageData?.height || 458}
-              scale={scale}
-              onLabelPress={handleLabelPress}
-              mode={mode}
-              selectedLabelId={selectedLabelId}
-              onPointDrag={handlePointDrag}
-              onLabelDelete={handleDeleteLabel}
-              drawingPoints={drawingPoints}
-              onCanvasClick={handleCanvasClick}
-            />
+          <View 
+            style={[
+              styles.viewportContainer,
+              { 
+                width: maxWidth,
+                height: maxHeight,
+                cursor: spacePressed || isPanning ? 'grabbing' : 'default',
+              } as any
+            ]}
+            // @ts-ignore
+            dataSet={{ imageContainer: 'true' }}
+          >
+            <View 
+              style={[
+                styles.transformContainer,
+                {
+                  transform: [
+                    { translateX: viewTranslateX },
+                    { translateY: viewTranslateY },
+                    { scale: viewScale },
+                  ],
+                  width: (imageData?.width || 768) * baseScale,
+                  height: (imageData?.height || 458) * baseScale,
+                }
+              ]}
+            >
+              <Image
+                source={getImageSource()}
+                style={[styles.image, { 
+                  width: (imageData?.width || 768) * baseScale, 
+                  height: (imageData?.height || 458) * baseScale 
+                }]}
+                resizeMode="contain"
+              />
+              <LabelOverlay
+                labels={imageData?.labels || []}
+                imageWidth={imageData?.width || 768}
+                imageHeight={imageData?.height || 458}
+                scale={baseScale}
+                onLabelPress={handleLabelPress}
+                mode={isPanning || spacePressed ? 'view' : mode}
+                selectedLabelId={selectedLabelId}
+                onPointDrag={handlePointDrag}
+                onLabelDelete={handleDeleteLabel}
+                drawingPoints={drawingPoints}
+                onCanvasClick={isPanning || spacePressed ? () => {} : handleCanvasClick}
+                rectStart={rectStart}
+                rectEnd={rectEnd}
+                onRectDrawStart={handleRectDrawStart}
+                onRectDrawMove={handleRectDrawMove}
+                onRectDrawEnd={handleRectDrawEnd}
+                batchSelectionRect={batchSelectionRect}
+                onBatchSelectionStart={handleBatchSelectionStart}
+                onBatchSelectionMove={handleBatchSelectionMove}
+                onBatchSelectionEnd={handleBatchSelectionEnd}
+                viewScale={viewScale}
+                viewTranslateX={viewTranslateX}
+                viewTranslateY={viewTranslateY}
+              />
+            </View>
           </View>
         </ScrollView>
 
@@ -422,7 +1193,11 @@ const LabelEditor: React.FC = () => {
         onClose={() => {
           setShowNewLabelModal(false);
           setDrawingPoints([]);
-          setMode('view');
+          if (mode === 'draw-rect') {
+            // Stay in rect mode for quick successive drawings
+          } else {
+            setMode('view');
+          }
         }}
         onConfirm={handleCreateLabel}
       />
@@ -431,6 +1206,16 @@ const LabelEditor: React.FC = () => {
         visible={showAddImageModal}
         onClose={() => setShowAddImageModal(false)}
         onConfirm={handleAddImage}
+      />
+
+      <BatchLabelModal
+        visible={showBatchModal}
+        onClose={() => {
+          setShowBatchModal(false);
+          setBatchSelectionRect(null);
+        }}
+        onConfirm={handleCreateBatchLabels}
+        selectionRect={batchSelectionRect}
       />
     </View>
   );
@@ -452,6 +1237,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingBottom: 40,
   },
+  horizontalScroll: {
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
   header: {
     alignItems: 'center',
     paddingVertical: 16,
@@ -472,6 +1261,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#999999',
   },
+  viewportContainer: {
+    overflow: 'hidden',
+    backgroundColor: '#E0E0E0',
+    borderRadius: 8,
+    position: 'relative',
+    ...(Platform.OS === 'web' ? {
+      boxShadow: '0 2px 10px rgba(0, 0, 0, 0.1)',
+    } : {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.1,
+      shadowRadius: 10,
+      elevation: 5,
+    }),
+  },
+  transformContainer: {
+    transformOrigin: '0 0',
+  } as any,
   imageContainer: {
     position: 'relative',
     backgroundColor: '#FFFFFF',
