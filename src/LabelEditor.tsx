@@ -616,6 +616,9 @@ const LabelEditor: React.FC = () => {
   const [magicWandTolerance, setMagicWandTolerance] = useState(30);
   const [magicWandEdgeThreshold, setMagicWandEdgeThreshold] = useState(50);
   
+  // Batch progress state
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; status: string } | null>(null);
+  
   // Zoom/pan state
   const [viewScale, setViewScale] = useState(1);
   const [viewTranslateX, setViewTranslateX] = useState(0);
@@ -1171,6 +1174,10 @@ const LabelEditor: React.FC = () => {
     if (!batchSelectionRect) return;
     
     saveHistory();
+    setShowBatchModal(false); // Close modal immediately to show progress
+    
+    const totalCells = config.rows * config.cols;
+    setBatchProgress({ current: 0, total: totalCells, status: 'Starting...' });
     
     const { start, end } = batchSelectionRect;
     const totalWidth = end.x - start.x;
@@ -1314,9 +1321,20 @@ const LabelEditor: React.FC = () => {
     
     for (let row = 0; row < config.rows; row++) {
       for (let col = 0; col < config.cols; col++) {
-        const { x: cellX, y: cellY, width: cellWidth, height: cellHeight } = getCellBounds(row, col);
-        
+        const cellIndex = row * config.cols + col;
         const currentHouseNum = getHouseNumber(row, col);
+        
+        // Update progress
+        setBatchProgress({ 
+          current: cellIndex, 
+          total: totalCells, 
+          status: `Processing cell ${cellIndex + 1}/${totalCells} (House #${currentHouseNum})` 
+        });
+        
+        // Allow UI to update
+        await new Promise(resolve => setTimeout(resolve, 0));
+        
+        const { x: cellX, y: cellY, width: cellWidth, height: cellHeight } = getCellBounds(row, col);
         
         // Get cell polygon points
         const cellPoints = [
@@ -1329,6 +1347,7 @@ const LabelEditor: React.FC = () => {
         // Auto-detect color if enabled
         let labelColor = config.color;
         if (config.autoDetectColor && Platform.OS === 'web') {
+          setBatchProgress({ current: cellIndex, total: totalCells, status: `Cell ${cellIndex + 1}: Detecting color...` });
           const detectedColor = await sampleColorFromRegion(imgSource, cellPoints, imgWidth, imgHeight);
           if (detectedColor) {
             labelColor = detectedColor;
@@ -1339,6 +1358,7 @@ const LabelEditor: React.FC = () => {
         // Pass the expected house number so we can filter it out
         let detectedArea: number | undefined;
         if (config.autoDetectArea && Platform.OS === 'web') {
+          setBatchProgress({ current: cellIndex, total: totalCells, status: `Cell ${cellIndex + 1}: Running OCR...` });
           const area = await extractAreaFromRegion(imgSource, cellPoints, imgWidth, imgHeight, currentHouseNum);
           if (area !== null) {
             detectedArea = area;
@@ -1363,6 +1383,8 @@ const LabelEditor: React.FC = () => {
       }
     }
 
+    setBatchProgress({ current: totalCells, total: totalCells, status: 'Saving labels...' });
+    
     setLabelsData(prev => ({
       ...prev,
       images: {
@@ -1376,6 +1398,7 @@ const LabelEditor: React.FC = () => {
 
     setBatchSelectionRect(null);
     setMode('view');
+    setBatchProgress(null); // Clear progress when done
   }, [batchSelectionRect, selectedImageKey, saveHistory, getImageSource, imageData]);
 
   // Handle label press
@@ -1676,6 +1699,27 @@ const LabelEditor: React.FC = () => {
         onConfirm={handleCreateBatchLabels}
         selectionRect={batchSelectionRect}
       />
+
+      {/* Batch Progress Overlay */}
+      {batchProgress && (
+        <View style={styles.progressOverlay}>
+          <View style={styles.progressModal}>
+            <Text style={styles.progressTitle}>Creating Batch Labels</Text>
+            <Text style={styles.progressStatus}>{batchProgress.status}</Text>
+            <View style={styles.progressBarContainer}>
+              <View 
+                style={[
+                  styles.progressBar, 
+                  { width: `${Math.round((batchProgress.current / batchProgress.total) * 100)}%` }
+                ]} 
+              />
+            </View>
+            <Text style={styles.progressPercent}>
+              {Math.round((batchProgress.current / batchProgress.total) * 100)}% ({batchProgress.current}/{batchProgress.total})
+            </Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 };
@@ -1758,6 +1802,64 @@ const styles = StyleSheet.create({
   },
   editorPanel: {
     padding: 16,
+  },
+  // Progress overlay styles
+  progressOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  progressModal: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 24,
+    width: 350,
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? {
+      boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
+    } : {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.25,
+      shadowRadius: 20,
+      elevation: 10,
+    }),
+  },
+  progressTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 12,
+  },
+  progressStatus: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  progressBarContainer: {
+    width: '100%',
+    height: 12,
+    backgroundColor: '#E0E0E0',
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: '#4CAF50',
+    borderRadius: 6,
+  },
+  progressPercent: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
   },
 });
 
