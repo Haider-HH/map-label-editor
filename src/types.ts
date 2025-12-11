@@ -36,7 +36,7 @@ export interface LabelsData {
   };
 }
 
-export type EditorMode = 'view' | 'edit' | 'draw' | 'draw-rect' | 'delete' | 'batch';
+export type EditorMode = 'view' | 'edit' | 'draw' | 'draw-rect' | 'delete' | 'batch' | 'magic-wand';
 
 export interface EditorState {
   mode: EditorMode;

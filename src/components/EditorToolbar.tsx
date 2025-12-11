@@ -19,6 +19,15 @@ interface EditorToolbarProps {
   onZoomIn: () => void;
   onZoomOut: () => void;
   onResetZoom: () => void;
+  // Auto-save status
+  autoSaveStatus?: 'idle' | 'saving' | 'saved';
+  lastAutoSave?: Date | null;
+  onManualSave?: () => void;
+  // Magic wand settings
+  magicWandTolerance?: number;
+  onMagicWandToleranceChange?: (value: number) => void;
+  magicWandEdgeThreshold?: number;
+  onMagicWandEdgeThresholdChange?: (value: number) => void;
 }
 
 const EditorToolbar: React.FC<EditorToolbarProps> = ({
@@ -37,6 +46,13 @@ const EditorToolbar: React.FC<EditorToolbarProps> = ({
   onZoomIn,
   onZoomOut,
   onResetZoom,
+  autoSaveStatus = 'idle',
+  lastAutoSave,
+  onManualSave,
+  magicWandTolerance = 30,
+  onMagicWandToleranceChange,
+  magicWandEdgeThreshold = 50,
+  onMagicWandEdgeThresholdChange,
 }) => {
   const canFinish = drawingPointsCount >= 3;
   
@@ -46,6 +62,7 @@ const EditorToolbar: React.FC<EditorToolbarProps> = ({
     { mode: 'draw', icon: '✒️', label: 'Polygon', shortcut: 'P', tip: 'Draw polygon labels' },
     { mode: 'draw-rect', icon: '⬜', label: 'Rect', shortcut: 'R', tip: 'Quick rectangle drawing' },
     { mode: 'batch', icon: '⊞', label: 'Batch', shortcut: 'B', tip: 'Create multiple labels at once' },
+    { mode: 'magic-wand', icon: '🪄', label: 'Magic', shortcut: 'W', tip: 'Auto-detect cell boundaries' },
     { mode: 'delete', icon: '🗑️', label: 'Delete', shortcut: 'D', tip: 'Delete labels' },
   ];
 
@@ -138,6 +155,42 @@ const EditorToolbar: React.FC<EditorToolbarProps> = ({
         </View>
       )}
 
+      {mode === 'magic-wand' && (
+        <View style={styles.magicWandSection}>
+          <Text style={styles.drawingHint}>
+            Click inside a cell to auto-detect its boundary. Adjust settings if detection is inaccurate.
+          </Text>
+          <View style={styles.magicWandControls}>
+            <View style={styles.sliderContainer}>
+              <Text style={styles.sliderLabel}>Color Tolerance: {magicWandTolerance}</Text>
+              {Platform.OS === 'web' && (
+                <input
+                  type="range"
+                  min="5"
+                  max="100"
+                  value={magicWandTolerance}
+                  onChange={(e) => onMagicWandToleranceChange?.(parseInt(e.target.value))}
+                  style={{ width: 120, marginLeft: 8 }}
+                />
+              )}
+            </View>
+            <View style={styles.sliderContainer}>
+              <Text style={styles.sliderLabel}>Edge Threshold: {magicWandEdgeThreshold}</Text>
+              {Platform.OS === 'web' && (
+                <input
+                  type="range"
+                  min="10"
+                  max="150"
+                  value={magicWandEdgeThreshold}
+                  onChange={(e) => onMagicWandEdgeThresholdChange?.(parseInt(e.target.value))}
+                  style={{ width: 120, marginLeft: 8 }}
+                />
+              )}
+            </View>
+          </View>
+        </View>
+      )}
+
       <View style={styles.actionsSection}>
         <Text style={styles.sectionLabel}>Actions</Text>
         <View style={styles.actionsRow}>
@@ -164,6 +217,28 @@ const EditorToolbar: React.FC<EditorToolbarProps> = ({
             <Text style={styles.actionIcon}>📤</Text>
             <Text style={styles.actionLabel}>Export</Text>
           </TouchableOpacity>
+
+          {onManualSave && (
+            <TouchableOpacity style={styles.actionButton} onPress={onManualSave}>
+              <Text style={styles.actionIcon}>💾</Text>
+              <Text style={styles.actionLabel}>Save Now</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        
+        {/* Auto-save status */}
+        <View style={styles.autoSaveContainer}>
+          <View style={[
+            styles.autoSaveIndicator,
+            autoSaveStatus === 'saving' && styles.autoSaveIndicatorSaving,
+            autoSaveStatus === 'saved' && styles.autoSaveIndicatorSaved,
+          ]} />
+          <Text style={styles.autoSaveText}>
+            {autoSaveStatus === 'saving' && 'Saving...'}
+            {autoSaveStatus === 'saved' && 'Saved ✓'}
+            {autoSaveStatus === 'idle' && lastAutoSave && `Auto-saved ${lastAutoSave.toLocaleTimeString()}`}
+            {autoSaveStatus === 'idle' && !lastAutoSave && 'Auto-save enabled (every 15s)'}
+          </Text>
         </View>
       </View>
     </View>
@@ -291,6 +366,26 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 12,
   },
+  magicWandSection: {
+    backgroundColor: '#FFF3E0',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  magicWandControls: {
+    flexDirection: 'row',
+    gap: 16,
+    marginTop: 8,
+    flexWrap: 'wrap',
+  },
+  sliderContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sliderLabel: {
+    fontSize: 12,
+    color: '#666',
+  },
   drawingHint: {
     fontSize: 13,
     color: '#1976D2',
@@ -349,6 +444,31 @@ const styles = StyleSheet.create({
   },
   actionLabel: {
     fontSize: 13,
+    color: '#666',
+  },
+  autoSaveContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#E0E0E0',
+  },
+  autoSaveIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#999',
+    marginRight: 8,
+  },
+  autoSaveIndicatorSaving: {
+    backgroundColor: '#FF9800',
+  },
+  autoSaveIndicatorSaved: {
+    backgroundColor: '#4CAF50',
+  },
+  autoSaveText: {
+    fontSize: 12,
     color: '#666',
   },
 });

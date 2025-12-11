@@ -26,10 +26,10 @@ export interface BatchConfig {
   houseNumberIncrement: number;
   customSequence?: number[]; // Custom sequence of house numbers
   useCustomSequence: boolean;
-  // Custom column/row proportions (e.g., "1,2,1" means middle column is twice as wide)
-  useCustomWidths: boolean;
-  columnWidths?: number[]; // Relative widths for each column
-  rowHeights?: number[]; // Relative heights for each row
+  // Custom divider positions (fractions from 0 to 1)
+  // e.g., for 3 columns: [0.4, 0.7] means dividers at 40% and 70%
+  columnDividers?: number[];
+  rowDividers?: number[];
   type: LabelType;
   color: string;
   numberingDirection: 'row' | 'col';
@@ -66,15 +66,42 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
   const [houseNumberIncrement, setHouseNumberIncrement] = useState('1');
   const [useCustomSequence, setUseCustomSequence] = useState(false);
   const [customSequenceText, setCustomSequenceText] = useState('');
-  const [useCustomWidths, setUseCustomWidths] = useState(false);
-  const [columnWidthsText, setColumnWidthsText] = useState('');
-  const [rowHeightsText, setRowHeightsText] = useState('');
+  // Draggable dividers - fractions from 0 to 1
+  const [columnDividers, setColumnDividers] = useState<number[]>([]);
+  const [rowDividers, setRowDividers] = useState<number[]>([]);
+  const [draggingDivider, setDraggingDivider] = useState<{ type: 'col' | 'row'; index: number } | null>(null);
+  const [dragStartDividers, setDragStartDividers] = useState<number[] | null>(null);
+  const [dragStartFraction, setDragStartFraction] = useState<number | null>(null);
+  const [selectedCol, setSelectedCol] = useState(0);
+  const [selectedRow, setSelectedRow] = useState(0);
   const [type, setType] = useState<LabelType>('residential');
   const [color, setColor] = useState('#4A90D9');
   const [numberingDirection, setNumberingDirection] = useState<'row' | 'col'>('row');
   const [numberingOrder, setNumberingOrder] = useState<NumberingOrder>('ltr');
   const [autoDetectColor, setAutoDetectColor] = useState(false);
   const [autoDetectArea, setAutoDetectArea] = useState(false);
+
+  const numCols = parseInt(cols) || 1;
+  const numRows = parseInt(rows) || 1;
+
+  // Generate equal dividers when grid size changes
+  React.useEffect(() => {
+    if (numCols > 1) {
+      const newDividers = Array.from({ length: numCols - 1 }, (_, i) => (i + 1) / numCols);
+      setColumnDividers(newDividers);
+    } else {
+      setColumnDividers([]);
+    }
+  }, [numCols]);
+
+  React.useEffect(() => {
+    if (numRows > 1) {
+      const newDividers = Array.from({ length: numRows - 1 }, (_, i) => (i + 1) / numRows);
+      setRowDividers(newDividers);
+    } else {
+      setRowDividers([]);
+    }
+  }, [numRows]);
 
   // Parse custom sequence from text
   const parseCustomSequence = (text: string): number[] => {
@@ -84,20 +111,115 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
       .filter(n => !isNaN(n));
   };
 
-  // Parse proportions from text (e.g., "1,2,1" or "1 2 1")
-  const parseProportions = (text: string): number[] => {
-    return text
-      .split(/[,\s]+/)
-      .map(s => parseFloat(s.trim()))
-      .filter(n => !isNaN(n) && n > 0);
+  const customSequence = parseCustomSequence(customSequenceText);
+
+  // Preview dimensions
+  const previewWidth = 280;
+  const previewHeight = selectionRect 
+    ? (previewWidth * (selectionRect.end.y - selectionRect.start.y) / (selectionRect.end.x - selectionRect.start.x))
+    : 120;
+
+  // Start dragging - save original state
+  const handleDividerDragStart = (type: 'col' | 'row', index: number, fraction: number) => {
+    const dividers = type === 'col' ? columnDividers : rowDividers;
+    setDraggingDivider({ type, index });
+    setDragStartDividers([...dividers]);
+    setDragStartFraction(fraction);
   };
 
-  const customSequence = parseCustomSequence(customSequenceText);
-  const columnWidths = parseProportions(columnWidthsText);
-  const rowHeights = parseProportions(rowHeightsText);
+  // Handle divider drag - PUSH mode: only affects the two adjacent cells
+  // This keeps all other cells exactly the same size
+  const handleDividerDrag = (type: 'col' | 'row', index: number, fraction: number) => {
+    if (!dragStartDividers || dragStartFraction === null) return;
+    
+    const dividers = type === 'col' ? columnDividers : rowDividers;
+    
+    // Simple mode: just move this divider, clamp between neighbors
+    const minFraction = index > 0 ? dividers[index - 1] + 0.01 : 0.01;
+    const maxFraction = index < dividers.length - 1 ? dividers[index + 1] - 0.01 : 0.99;
+    const clampedFraction = Math.max(minFraction, Math.min(maxFraction, fraction));
+    
+    if (type === 'col') {
+      const newDividers = [...columnDividers];
+      newDividers[index] = clampedFraction;
+      setColumnDividers(newDividers);
+    } else {
+      const newDividers = [...rowDividers];
+      newDividers[index] = clampedFraction;
+      setRowDividers(newDividers);
+    }
+  };
 
-  const numCols = parseInt(cols) || 1;
-  const numRows = parseInt(rows) || 1;
+  // End dragging
+  const handleDividerDragEnd = () => {
+    setDraggingDivider(null);
+    setDragStartDividers(null);
+    setDragStartFraction(null);
+  };
+
+  // Quick adjust buttons - set specific cells to be larger/smaller
+  const adjustCell = (type: 'col' | 'row', cellIndex: number, delta: number) => {
+    const dividers = type === 'col' ? [...columnDividers] : [...rowDividers];
+    const numCells = type === 'col' ? numCols : numRows;
+    
+    if (dividers.length === 0) return;
+    
+    // Get current cell boundaries
+    const boundaries = [0, ...dividers, 1];
+    const cellStart = boundaries[cellIndex];
+    const cellEnd = boundaries[cellIndex + 1];
+    const cellSize = cellEnd - cellStart;
+    const newSize = Math.max(0.02, Math.min(0.98, cellSize + delta));
+    const sizeDiff = newSize - cellSize;
+    
+    // Distribute the size change to other cells proportionally
+    const otherCellsTotal = 1 - cellSize;
+    if (otherCellsTotal <= 0.02) return;
+    
+    // Adjust all dividers
+    for (let i = 0; i < dividers.length; i++) {
+      if (i < cellIndex) {
+        // Dividers before: scale down proportionally
+        const scaleFactor = (otherCellsTotal - sizeDiff) / otherCellsTotal;
+        dividers[i] = dividers[i] * scaleFactor;
+      } else if (i === cellIndex) {
+        // The divider at the end of this cell: move by sizeDiff
+        if (cellIndex < dividers.length) {
+          const prevBoundary = cellIndex > 0 ? dividers[cellIndex - 1] : 0;
+          dividers[i] = prevBoundary + newSize;
+        }
+      } else {
+        // Dividers after: shift and scale
+        const prevBoundary = cellIndex > 0 ? boundaries[cellIndex] : 0;
+        const scaleFactor = (otherCellsTotal - sizeDiff) / otherCellsTotal;
+        const relativePos = (boundaries[i + 1] - cellEnd) / (1 - cellEnd);
+        dividers[i] = (prevBoundary + newSize) + relativePos * (1 - prevBoundary - newSize);
+      }
+    }
+    
+    // Recalculate more simply: set the target cell size and redistribute others
+    const newBoundaries = [0];
+    let remaining = 1 - newSize;
+    for (let i = 0; i < numCells; i++) {
+      if (i === cellIndex) {
+        newBoundaries.push(newBoundaries[i] + newSize);
+      } else {
+        const origSize = boundaries[i + 1] - boundaries[i];
+        const proportion = origSize / otherCellsTotal;
+        const adjustedSize = Math.max(0.01, proportion * remaining);
+        newBoundaries.push(newBoundaries[i] + adjustedSize);
+      }
+    }
+    
+    // Extract dividers from boundaries (skip first 0 and last 1)
+    const newDividers = newBoundaries.slice(1, -1);
+    
+    if (type === 'col') {
+      setColumnDividers(newDividers);
+    } else {
+      setRowDividers(newDividers);
+    }
+  };
 
   const handleConfirm = () => {
     onConfirm({
@@ -108,9 +230,8 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
       houseNumberIncrement: parseInt(houseNumberIncrement) || 1,
       useCustomSequence,
       customSequence: useCustomSequence ? customSequence : undefined,
-      useCustomWidths,
-      columnWidths: useCustomWidths && columnWidths.length > 0 ? columnWidths : undefined,
-      rowHeights: useCustomWidths && rowHeights.length > 0 ? rowHeights : undefined,
+      columnDividers: columnDividers.length > 0 ? columnDividers : undefined,
+      rowDividers: rowDividers.length > 0 ? rowDividers : undefined,
       type,
       color,
       numberingDirection,
@@ -159,56 +280,198 @@ const BatchLabelModal: React.FC<BatchLabelModalProps> = ({
                   </View>
                 </View>
 
-                {/* Custom Widths Toggle */}
+                {/* Visual Grid Preview with Draggable Dividers */}
                 <View style={styles.field}>
-                  <TouchableOpacity
-                    style={[
-                      styles.checkboxRow,
-                      useCustomWidths && styles.checkboxRowActive,
-                    ]}
-                    onPress={() => setUseCustomWidths(!useCustomWidths)}
-                  >
-                    <View style={[styles.checkbox, useCustomWidths && styles.checkboxChecked]}>
-                      {useCustomWidths && <Text style={styles.checkmark}>✓</Text>}
+                  <Text style={styles.fieldLabel}>Grid Preview - Drag lines or use controls below</Text>
+                  
+                  <View style={{ flexDirection: 'row', alignSelf: 'center' }}>
+                    <View 
+                      style={[styles.gridPreview, { width: previewWidth, height: Math.min(previewHeight, 160) }]}
+                      // @ts-ignore - web specific
+                      onMouseMove={(e: any) => {
+                        if (draggingDivider && Platform.OS === 'web') {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          if (draggingDivider.type === 'col') {
+                            const fraction = (e.clientX - rect.left) / rect.width;
+                            handleDividerDrag('col', draggingDivider.index, fraction);
+                          } else {
+                            const fraction = (e.clientY - rect.top) / rect.height;
+                            handleDividerDrag('row', draggingDivider.index, fraction);
+                          }
+                        }
+                      }}
+                      // @ts-ignore
+                      onMouseUp={() => handleDividerDragEnd()}
+                      // @ts-ignore
+                      onMouseLeave={() => handleDividerDragEnd()}
+                    >
+                      {/* Grid cells */}
+                      {Array.from({ length: numRows }).map((_, rowIdx) => {
+                        const topFraction = rowIdx === 0 ? 0 : rowDividers[rowIdx - 1];
+                        const bottomFraction = rowIdx === numRows - 1 ? 1 : rowDividers[rowIdx];
+                        const cellHeight = (bottomFraction - topFraction) * Math.min(previewHeight, 160);
+                        const cellTop = topFraction * Math.min(previewHeight, 160);
+                        
+                        return Array.from({ length: numCols }).map((_, colIdx) => {
+                          const leftFraction = colIdx === 0 ? 0 : columnDividers[colIdx - 1];
+                          const rightFraction = colIdx === numCols - 1 ? 1 : columnDividers[colIdx];
+                          const cellWidth = (rightFraction - leftFraction) * previewWidth;
+                          const cellLeft = leftFraction * previewWidth;
+                          const cellNum = rowIdx * numCols + colIdx + 1;
+                          const isSelectedCell = colIdx === selectedCol || rowIdx === selectedRow;
+                          
+                          return (
+                            <TouchableOpacity
+                              key={`cell-${rowIdx}-${colIdx}`}
+                              style={[
+                                styles.gridCell,
+                                {
+                                  position: 'absolute',
+                                  left: cellLeft,
+                                  top: cellTop,
+                                  width: cellWidth,
+                                  height: cellHeight,
+                                  backgroundColor: isSelectedCell ? color + '70' : color + '40',
+                                  borderColor: isSelectedCell ? '#333' : color,
+                                  borderWidth: isSelectedCell ? 2 : 1,
+                                }
+                              ]}
+                              onPress={() => {
+                                setSelectedCol(colIdx);
+                                setSelectedRow(rowIdx);
+                              }}
+                            >
+                              {cellWidth > 20 && cellHeight > 15 && (
+                                <Text style={[styles.gridCellText, { color, fontSize: Math.min(12, cellWidth / 2.5) }]}>{cellNum}</Text>
+                              )}
+                            </TouchableOpacity>
+                          );
+                        });
+                      })}
+                      
+                      {/* Column dividers (draggable) */}
+                      {columnDividers.map((fraction, idx) => (
+                        <View
+                          key={`col-divider-${idx}`}
+                          style={[
+                            styles.dividerVertical,
+                            { left: fraction * previewWidth - 4 },
+                            draggingDivider?.type === 'col' && draggingDivider?.index === idx && styles.dividerActive,
+                          ]}
+                          // @ts-ignore
+                          onMouseDown={(e: any) => {
+                            e.preventDefault();
+                            handleDividerDragStart('col', idx, fraction);
+                          }}
+                        >
+                          <View style={[styles.dividerHandle, draggingDivider?.type === 'col' && draggingDivider?.index === idx && styles.dividerHandleActive]} />
+                        </View>
+                      ))}
+                      
+                      {/* Row dividers (draggable) */}
+                      {rowDividers.map((fraction, idx) => (
+                        <View
+                          key={`row-divider-${idx}`}
+                          style={[
+                            styles.dividerHorizontal,
+                            { top: fraction * Math.min(previewHeight, 160) - 4 },
+                            draggingDivider?.type === 'row' && draggingDivider?.index === idx && styles.dividerActive,
+                          ]}
+                          // @ts-ignore
+                          onMouseDown={(e: any) => {
+                            e.preventDefault();
+                            handleDividerDragStart('row', idx, fraction);
+                          }}
+                        >
+                          <View style={[styles.dividerHandle, { width: 20, height: 8 }, draggingDivider?.type === 'row' && draggingDivider?.index === idx && styles.dividerHandleActive]} />
+                        </View>
+                      ))}
                     </View>
-                    <Text style={styles.checkboxLabel}>Custom cell sizes (for unequal widths)</Text>
+                  </View>
+                  
+                  {/* Compact adjustment controls */}
+                  <View style={styles.adjustControlsRow}>
+                    <View style={styles.adjustControl}>
+                      <Text style={styles.adjustControlLabel}>Column:</Text>
+                      <View style={styles.adjustSelector}>
+                        <TouchableOpacity 
+                          style={styles.selectorArrow}
+                          onPress={() => setSelectedCol(Math.max(0, selectedCol - 1))}
+                        >
+                          <Text style={styles.selectorArrowText}>◀</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.selectorValue}>{selectedCol + 1}/{numCols}</Text>
+                        <TouchableOpacity 
+                          style={styles.selectorArrow}
+                          onPress={() => setSelectedCol(Math.min(numCols - 1, selectedCol + 1))}
+                        >
+                          <Text style={styles.selectorArrowText}>▶</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <View style={styles.adjustButtons}>
+                        <TouchableOpacity 
+                          style={styles.adjustBtn}
+                          onPress={() => adjustCell('col', selectedCol, -0.02)}
+                        >
+                          <Text style={styles.adjustBtnText}>− Shrink</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                          style={styles.adjustBtn}
+                          onPress={() => adjustCell('col', selectedCol, 0.02)}
+                        >
+                          <Text style={styles.adjustBtnText}>+ Expand</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                    
+                    <View style={styles.adjustControl}>
+                      <Text style={styles.adjustControlLabel}>Row:</Text>
+                      <View style={styles.adjustSelector}>
+                        <TouchableOpacity 
+                          style={styles.selectorArrow}
+                          onPress={() => setSelectedRow(Math.max(0, selectedRow - 1))}
+                        >
+                          <Text style={styles.selectorArrowText}>◀</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.selectorValue}>{selectedRow + 1}/{numRows}</Text>
+                        <TouchableOpacity 
+                          style={styles.selectorArrow}
+                          onPress={() => setSelectedRow(Math.min(numRows - 1, selectedRow + 1))}
+                        >
+                          <Text style={styles.selectorArrowText}>▶</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <View style={styles.adjustButtons}>
+                        <TouchableOpacity 
+                          style={styles.adjustBtn}
+                          onPress={() => adjustCell('row', selectedRow, -0.03)}
+                        >
+                          <Text style={styles.adjustBtnText}>− Shrink</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                          style={styles.adjustBtn}
+                          onPress={() => adjustCell('row', selectedRow, 0.03)}
+                        >
+                          <Text style={styles.adjustBtnText}>+ Expand</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  <Text style={styles.hint}>
+                    Click a cell to select it, then use controls above. Or drag the blue lines directly.
+                  </Text>
+                  <TouchableOpacity 
+                    style={styles.resetDividersButton}
+                    onPress={() => {
+                      // Reset to equal divisions
+                      setColumnDividers(Array.from({ length: numCols - 1 }, (_, i) => (i + 1) / numCols));
+                      setRowDividers(Array.from({ length: numRows - 1 }, (_, i) => (i + 1) / numRows));
+                    }}
+                  >
+                    <Text style={styles.resetDividersText}>↺ Reset to Equal</Text>
                   </TouchableOpacity>
                 </View>
-
-                {useCustomWidths && (
-                  <>
-                    <View style={styles.field}>
-                      <Text style={styles.fieldLabel}>Column Proportions</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={columnWidthsText}
-                        onChangeText={setColumnWidthsText}
-                        placeholder={`e.g., 1, 2, 1 for ${numCols} columns`}
-                      />
-                      <Text style={styles.hint}>
-                        Enter relative widths (e.g., "1, 2, 1" = middle is 2× wider).
-                        {columnWidths.length > 0 && columnWidths.length !== numCols && (
-                          `\n⚠️ Need ${numCols} values, have ${columnWidths.length}`
-                        )}
-                      </Text>
-                    </View>
-                    <View style={styles.field}>
-                      <Text style={styles.fieldLabel}>Row Proportions (optional)</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={rowHeightsText}
-                        onChangeText={setRowHeightsText}
-                        placeholder={`e.g., 1, 1 for ${numRows} rows`}
-                      />
-                      <Text style={styles.hint}>
-                        Leave empty for equal heights.
-                        {rowHeights.length > 0 && rowHeights.length !== numRows && (
-                          `\n⚠️ Need ${numRows} values, have ${rowHeights.length}`
-                        )}
-                      </Text>
-                    </View>
-                  </>
-                )}
 
                 {/* Block Number */}
                 <View style={styles.field}>
@@ -788,6 +1051,204 @@ const styles = StyleSheet.create({
   checkboxLabel: {
     fontSize: 14,
     color: '#333',
+  },
+  // Grid Preview Styles
+  gridPreview: {
+    backgroundColor: '#F8F8F8',
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#DDD',
+    position: 'relative',
+    overflow: 'hidden',
+    alignSelf: 'center',
+    marginVertical: 8,
+  },
+  gridCell: {
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  gridCellText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  dividerVertical: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'ew-resize' as any } : {}),
+  },
+  dividerHorizontal: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'ns-resize' as any } : {}),
+  },
+  dividerHandle: {
+    width: 8,
+    height: 20,
+    backgroundColor: '#2196F3',
+    borderRadius: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'grab' as any } : {}),
+  },
+  dividerActive: {
+    zIndex: 20,
+  },
+  dividerHandleActive: {
+    backgroundColor: '#1565C0',
+    transform: [{ scale: 1.2 }],
+  },
+  resetDividersButton: {
+    alignSelf: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginTop: 4,
+    borderRadius: 4,
+    backgroundColor: '#F0F0F0',
+  },
+  resetDividersText: {
+    fontSize: 12,
+    color: '#666',
+  },
+  // Adjustment button styles
+  adjustButtonsRow: {
+    flexDirection: 'row',
+    position: 'relative',
+    height: 28,
+    marginBottom: 4,
+  },
+  adjustButtonsCol: {
+    position: 'relative',
+    width: 40,
+    marginRight: 4,
+  },
+  adjustButtonGroup: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 2,
+  },
+  adjustButtonGroupVert: {
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 1,
+  },
+  adjustButton: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#E3F2FD',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2196F3',
+  },
+  adjustButtonSmall: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#E3F2FD',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2196F3',
+  },
+  adjustButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#2196F3',
+    lineHeight: 16,
+  },
+  adjustButtonTextSmall: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#2196F3',
+    lineHeight: 14,
+  },
+  adjustLabel: {
+    fontSize: 9,
+    color: '#666',
+    marginHorizontal: 2,
+  },
+  adjustLabelSmall: {
+    fontSize: 8,
+    color: '#666',
+  },
+  // New compact adjustment controls
+  adjustControlsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 16,
+    marginTop: 12,
+    paddingHorizontal: 8,
+  },
+  adjustControl: {
+    alignItems: 'center',
+    gap: 6,
+    padding: 8,
+    backgroundColor: '#F5F5F5',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    minWidth: 140,
+  },
+  adjustControlLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#666',
+  },
+  adjustSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  selectorArrow: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#E3F2FD',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2196F3',
+  },
+  selectorArrowText: {
+    fontSize: 14,
+    color: '#2196F3',
+    fontWeight: '600',
+  },
+  selectorValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
+    minWidth: 40,
+    textAlign: 'center',
+  },
+  adjustButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  adjustBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: '#E3F2FD',
+    borderWidth: 1,
+    borderColor: '#2196F3',
+  },
+  adjustBtnText: {
+    fontSize: 12,
+    color: '#1976D2',
+    fontWeight: '600',
   },
 });
 

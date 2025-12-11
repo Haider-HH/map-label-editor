@@ -323,12 +323,277 @@ const extractAreaFromRegion = async (
   }
 };
 
+// Magic Wand - Flood fill to detect cell boundaries
+// Uses edge detection to find the polygon boundary when clicking inside a cell
+const magicWandSelect = async (
+  imageSource: any,
+  clickPoint: Point,
+  imageWidth: number,
+  imageHeight: number,
+  tolerance: number = 30,
+  edgeThreshold: number = 50
+): Promise<Point[] | null> => {
+  if (Platform.OS !== 'web') return null;
+  
+  try {
+    // Create canvas and load image
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    
+    canvas.width = imageWidth;
+    canvas.height = imageHeight;
+    
+    // Load the image
+    const img = new window.Image();
+    img.crossOrigin = 'anonymous';
+    
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Failed to load image'));
+      
+      if (typeof imageSource === 'string') {
+        img.src = imageSource;
+      } else if (imageSource?.uri) {
+        img.src = imageSource.uri;
+      } else {
+        reject(new Error('Invalid image source'));
+        return;
+      }
+    });
+    
+    if (!img.complete || img.naturalWidth === 0) return null;
+    
+    // Draw image to canvas
+    ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
+    
+    // Get image data
+    const imgData = ctx.getImageData(0, 0, imageWidth, imageHeight);
+    const pixels = imgData.data;
+    
+    const getPixel = (x: number, y: number): [number, number, number] => {
+      const i = (y * imageWidth + x) * 4;
+      return [pixels[i], pixels[i + 1], pixels[i + 2]];
+    };
+    
+    // Calculate gradient magnitude (edge strength) at a point
+    const getEdgeStrength = (x: number, y: number): number => {
+      if (x <= 0 || x >= imageWidth - 1 || y <= 0 || y >= imageHeight - 1) return 255;
+      
+      const [r1, g1, b1] = getPixel(x - 1, y);
+      const [r2, g2, b2] = getPixel(x + 1, y);
+      const [r3, g3, b3] = getPixel(x, y - 1);
+      const [r4, g4, b4] = getPixel(x, y + 1);
+      
+      const gx = Math.abs(r2 - r1) + Math.abs(g2 - g1) + Math.abs(b2 - b1);
+      const gy = Math.abs(r4 - r3) + Math.abs(g4 - g3) + Math.abs(b4 - b3);
+      
+      return Math.sqrt(gx * gx + gy * gy);
+    };
+    
+    const startX = Math.round(clickPoint.x);
+    const startY = Math.round(clickPoint.y);
+    
+    if (startX < 0 || startX >= imageWidth || startY < 0 || startY >= imageHeight) {
+      return null;
+    }
+    
+    // Flood fill to find the region
+    const visited = new Set<string>();
+    const region = new Set<string>();
+    const queue: [number, number][] = [[startX, startY]];
+    const key = (x: number, y: number) => `${x},${y}`;
+    
+    // Get starting color for comparison
+    const [startR, startG, startB] = getPixel(startX, startY);
+    
+    const colorMatch = (x: number, y: number): boolean => {
+      const [r, g, b] = getPixel(x, y);
+      const diff = Math.abs(r - startR) + Math.abs(g - startG) + Math.abs(b - startB);
+      return diff <= tolerance;
+    };
+    
+    // Limit flood fill to prevent performance issues
+    const maxPixels = 500000;
+    let pixelCount = 0;
+    
+    while (queue.length > 0 && pixelCount < maxPixels) {
+      const [x, y] = queue.shift()!;
+      const k = key(x, y);
+      
+      if (visited.has(k)) continue;
+      visited.add(k);
+      
+      if (x < 0 || x >= imageWidth || y < 0 || y >= imageHeight) continue;
+      
+      // Check if this is an edge (boundary)
+      const edgeStrength = getEdgeStrength(x, y);
+      if (edgeStrength > edgeThreshold) continue;
+      
+      // Check color similarity
+      if (!colorMatch(x, y)) continue;
+      
+      region.add(k);
+      pixelCount++;
+      
+      // Add neighbors
+      queue.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+    }
+    
+    if (region.size < 100) {
+      console.warn('Region too small, try adjusting tolerance');
+      return null;
+    }
+    
+    // Extract boundary points using marching squares-like approach
+    const regionArray = Array.from(region).map(k => {
+      const [x, y] = k.split(',').map(Number);
+      return { x, y };
+    });
+    
+    // Find bounding box
+    const minX = Math.min(...regionArray.map(p => p.x));
+    const maxX = Math.max(...regionArray.map(p => p.x));
+    const minY = Math.min(...regionArray.map(p => p.y));
+    const maxY = Math.max(...regionArray.map(p => p.y));
+    
+    // Find boundary pixels
+    const boundary: Point[] = [];
+    const isInRegion = (x: number, y: number) => region.has(key(x, y));
+    
+    for (const k of region) {
+      const [x, y] = k.split(',').map(Number);
+      // Check if this is a boundary pixel (has at least one non-region neighbor)
+      if (!isInRegion(x - 1, y) || !isInRegion(x + 1, y) || 
+          !isInRegion(x, y - 1) || !isInRegion(x, y + 1)) {
+        boundary.push({ x, y });
+      }
+    }
+    
+    if (boundary.length < 4) {
+      // Fall back to bounding box
+      return [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY },
+      ];
+    }
+    
+    // Simplify boundary to polygon using convex hull or simplified contour
+    // Sort boundary points by angle from centroid
+    const centroidX = regionArray.reduce((s, p) => s + p.x, 0) / regionArray.length;
+    const centroidY = regionArray.reduce((s, p) => s + p.y, 0) / regionArray.length;
+    
+    boundary.sort((a, b) => {
+      const angleA = Math.atan2(a.y - centroidY, a.x - centroidX);
+      const angleB = Math.atan2(b.y - centroidY, b.x - centroidX);
+      return angleA - angleB;
+    });
+    
+    // Sample points to create a simplified polygon (every Nth point)
+    const targetPoints = Math.min(boundary.length, 50);
+    const step = Math.max(1, Math.floor(boundary.length / targetPoints));
+    const simplified: Point[] = [];
+    
+    for (let i = 0; i < boundary.length; i += step) {
+      simplified.push(boundary[i]);
+    }
+    
+    // Further simplify using Douglas-Peucker algorithm
+    const simplifyPolygon = (points: Point[], epsilon: number): Point[] => {
+      if (points.length <= 2) return points;
+      
+      let maxDist = 0;
+      let maxIdx = 0;
+      const start = points[0];
+      const end = points[points.length - 1];
+      
+      for (let i = 1; i < points.length - 1; i++) {
+        const dist = perpendicularDistance(points[i], start, end);
+        if (dist > maxDist) {
+          maxDist = dist;
+          maxIdx = i;
+        }
+      }
+      
+      if (maxDist > epsilon) {
+        const left = simplifyPolygon(points.slice(0, maxIdx + 1), epsilon);
+        const right = simplifyPolygon(points.slice(maxIdx), epsilon);
+        return [...left.slice(0, -1), ...right];
+      }
+      
+      return [start, end];
+    };
+    
+    const perpendicularDistance = (point: Point, lineStart: Point, lineEnd: Point): number => {
+      const dx = lineEnd.x - lineStart.x;
+      const dy = lineEnd.y - lineStart.y;
+      const mag = Math.sqrt(dx * dx + dy * dy);
+      if (mag === 0) return Math.sqrt((point.x - lineStart.x) ** 2 + (point.y - lineStart.y) ** 2);
+      
+      const u = ((point.x - lineStart.x) * dx + (point.y - lineStart.y) * dy) / (mag * mag);
+      const closestX = lineStart.x + u * dx;
+      const closestY = lineStart.y + u * dy;
+      
+      return Math.sqrt((point.x - closestX) ** 2 + (point.y - closestY) ** 2);
+    };
+    
+    // Use epsilon based on region size
+    const regionSize = Math.max(maxX - minX, maxY - minY);
+    const epsilon = regionSize * 0.02; // 2% of region size
+    
+    const finalPolygon = simplifyPolygon(simplified, epsilon);
+    
+    // Ensure we have at least 4 points for a reasonable polygon
+    if (finalPolygon.length < 4) {
+      return [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY },
+      ];
+    }
+    
+    return finalPolygon;
+  } catch (error) {
+    console.error('Magic wand selection failed:', error);
+    return null;
+  }
+};
+
 const LabelEditor: React.FC = () => {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   
+  // Auto-save constants
+  const AUTO_SAVE_INTERVAL = 15000; // 15 seconds
+  const LOCAL_STORAGE_KEY = 'label-editor-autosave';
+  
+  // Load initial data from localStorage if available
+  const getInitialLabelsData = (): LabelsData => {
+    if (Platform.OS === 'web') {
+      try {
+        const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.data && parsed.data.images) {
+            console.log('Loaded auto-saved data from', new Date(parsed.timestamp).toLocaleString());
+            return parsed.data;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to load auto-saved data:', e);
+      }
+    }
+    return initialLabelsData;
+  };
+  
   // State
-  const [labelsData, setLabelsData] = useState<LabelsData>(initialLabelsData);
-  const [selectedImageKey, setSelectedImageKey] = useState<string>(Object.keys(initialLabelsData.images)[0]);
+  const [labelsData, setLabelsData] = useState<LabelsData>(getInitialLabelsData);
+  const [selectedImageKey, setSelectedImageKey] = useState<string>(() => {
+    const data = getInitialLabelsData();
+    return Object.keys(data.images)[0];
+  });
   const [selectedLabelId, setSelectedLabelId] = useState<string | null>(null);
   const [mode, setMode] = useState<EditorMode>('view');
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
@@ -336,6 +601,8 @@ const LabelEditor: React.FC = () => {
   const [showAddImageModal, setShowAddImageModal] = useState(false);
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [history, setHistory] = useState<LabelsData[]>([]);
+  const [lastAutoSave, setLastAutoSave] = useState<Date | null>(null);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   
   // Rectangle drawing state
   const [rectStart, setRectStart] = useState<Point | null>(null);
@@ -343,6 +610,11 @@ const LabelEditor: React.FC = () => {
   
   // Batch selection state
   const [batchSelectionRect, setBatchSelectionRect] = useState<{ start: Point; end: Point } | null>(null);
+  
+  // Magic wand state
+  const [magicWandLoading, setMagicWandLoading] = useState(false);
+  const [magicWandTolerance, setMagicWandTolerance] = useState(30);
+  const [magicWandEdgeThreshold, setMagicWandEdgeThreshold] = useState(50);
   
   // Zoom/pan state
   const [viewScale, setViewScale] = useState(1);
@@ -406,6 +678,55 @@ const LabelEditor: React.FC = () => {
   const saveHistory = useCallback(() => {
     setHistory(prev => [...prev.slice(-19), JSON.parse(JSON.stringify(labelsData))]);
   }, [labelsData]);
+
+  // Auto-save to localStorage
+  const performAutoSave = useCallback(() => {
+    if (Platform.OS === 'web') {
+      try {
+        setAutoSaveStatus('saving');
+        const saveData = {
+          data: labelsData,
+          timestamp: Date.now(),
+        };
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(saveData));
+        setLastAutoSave(new Date());
+        setAutoSaveStatus('saved');
+        console.log('Auto-saved at', new Date().toLocaleTimeString());
+        
+        // Reset status after 2 seconds
+        setTimeout(() => {
+          setAutoSaveStatus('idle');
+        }, 2000);
+      } catch (e) {
+        console.error('Auto-save failed:', e);
+        setAutoSaveStatus('idle');
+      }
+    }
+  }, [labelsData]);
+
+  // Auto-save effect - runs every 15 seconds
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    
+    const intervalId = setInterval(() => {
+      performAutoSave();
+    }, AUTO_SAVE_INTERVAL);
+    
+    // Also save when component unmounts
+    return () => {
+      clearInterval(intervalId);
+      // Final save on unmount
+      try {
+        const saveData = {
+          data: labelsData,
+          timestamp: Date.now(),
+        };
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(saveData));
+      } catch (e) {
+        console.error('Final save failed:', e);
+      }
+    };
+  }, [performAutoSave]);
 
   // Undo
   const handleUndo = useCallback(() => {
@@ -537,6 +858,9 @@ const LabelEditor: React.FC = () => {
           break;
         case 'b':
           setMode('batch');
+          break;
+        case 'w':
+          setMode('magic-wand'); // Magic wand
           break;
         case 'd':
           if (!selectedLabelId) {
@@ -749,6 +1073,42 @@ const LabelEditor: React.FC = () => {
     }
   }, []);
 
+  // Magic wand click handler
+  const handleMagicWandClick = useCallback(async (point: Point) => {
+    if (mode !== 'magic-wand' || magicWandLoading) return;
+    
+    setMagicWandLoading(true);
+    try {
+      const imgSource = getImageSource();
+      const polygon = await magicWandSelect(
+        imgSource,
+        point,
+        imageData?.width || 768,
+        imageData?.height || 458,
+        magicWandTolerance,
+        magicWandEdgeThreshold
+      );
+      
+      if (polygon && polygon.length >= 3) {
+        setDrawingPoints(polygon);
+        setShowNewLabelModal(true);
+      } else {
+        if (Platform.OS === 'web') {
+          alert('Could not detect cell boundary. Try clicking in a different area or adjusting tolerance.');
+        } else {
+          Alert.alert('Detection Failed', 'Could not detect cell boundary. Try clicking in a different area or adjusting tolerance.');
+        }
+      }
+    } catch (error) {
+      console.error('Magic wand failed:', error);
+      if (Platform.OS === 'web') {
+        alert('Magic wand selection failed. Try adjusting the tolerance or edge threshold.');
+      }
+    } finally {
+      setMagicWandLoading(false);
+    }
+  }, [mode, magicWandLoading, getImageSource, imageData, magicWandTolerance, magicWandEdgeThreshold]);
+
   // Finish drawing
   const handleFinishDrawing = useCallback(() => {
     if (drawingPoints.length >= 3) {
@@ -816,42 +1176,29 @@ const LabelEditor: React.FC = () => {
     const totalWidth = end.x - start.x;
     const totalHeight = end.y - start.y;
     
-    // Calculate cell positions based on custom widths or equal distribution
+    // Calculate cell positions based on dividers or equal distribution
     const getCellBounds = (row: number, col: number): { x: number; y: number; width: number; height: number } => {
-      let cellX = start.x;
-      let cellY = start.y;
-      let cellWidth: number;
-      let cellHeight: number;
+      // Use dividers if provided, otherwise equal divisions
+      const colDividers = config.columnDividers || 
+        Array.from({ length: config.cols - 1 }, (_, i) => (i + 1) / config.cols);
+      const rowDividers = config.rowDividers || 
+        Array.from({ length: config.rows - 1 }, (_, i) => (i + 1) / config.rows);
       
-      // Handle column widths
-      if (config.useCustomWidths && config.columnWidths && config.columnWidths.length === config.cols) {
-        const totalProportion = config.columnWidths.reduce((a, b) => a + b, 0);
-        // Calculate x position by summing previous column widths
-        for (let c = 0; c < col; c++) {
-          cellX += (config.columnWidths[c] / totalProportion) * totalWidth;
-        }
-        cellWidth = (config.columnWidths[col] / totalProportion) * totalWidth;
-      } else {
-        // Equal widths
-        cellX = start.x + col * (totalWidth / config.cols);
-        cellWidth = totalWidth / config.cols;
-      }
+      // Get column boundaries as fractions [0, divider1, divider2, ..., 1]
+      const colBoundaries = [0, ...colDividers, 1];
+      const rowBoundaries = [0, ...rowDividers, 1];
       
-      // Handle row heights
-      if (config.useCustomWidths && config.rowHeights && config.rowHeights.length === config.rows) {
-        const totalProportion = config.rowHeights.reduce((a, b) => a + b, 0);
-        // Calculate y position by summing previous row heights
-        for (let r = 0; r < row; r++) {
-          cellY += (config.rowHeights[r] / totalProportion) * totalHeight;
-        }
-        cellHeight = (config.rowHeights[row] / totalProportion) * totalHeight;
-      } else {
-        // Equal heights
-        cellY = start.y + row * (totalHeight / config.rows);
-        cellHeight = totalHeight / config.rows;
-      }
+      const leftFraction = colBoundaries[col];
+      const rightFraction = colBoundaries[col + 1];
+      const topFraction = rowBoundaries[row];
+      const bottomFraction = rowBoundaries[row + 1];
       
-      return { x: cellX, y: cellY, width: cellWidth, height: cellHeight };
+      return {
+        x: start.x + leftFraction * totalWidth,
+        y: start.y + topFraction * totalHeight,
+        width: (rightFraction - leftFraction) * totalWidth,
+        height: (bottomFraction - topFraction) * totalHeight,
+      };
     };
     
     // Calculate house number for each cell position based on numbering order
@@ -1145,7 +1492,7 @@ const LabelEditor: React.FC = () => {
 
   // Mode change
   const handleModeChange = useCallback((newMode: EditorMode) => {
-    if (newMode !== 'draw') {
+    if (newMode !== 'draw' && newMode !== 'magic-wand') {
       setDrawingPoints([]);
     }
     if (newMode !== 'draw-rect') {
@@ -1155,7 +1502,7 @@ const LabelEditor: React.FC = () => {
     if (newMode !== 'batch') {
       setBatchSelectionRect(null);
     }
-    if (newMode === 'draw' || newMode === 'delete' || newMode === 'draw-rect' || newMode === 'batch') {
+    if (newMode === 'draw' || newMode === 'delete' || newMode === 'draw-rect' || newMode === 'batch' || newMode === 'magic-wand') {
       setSelectedLabelId(null);
     }
     setMode(newMode);
@@ -1179,6 +1526,13 @@ const LabelEditor: React.FC = () => {
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
         onResetZoom={handleResetZoom}
+        autoSaveStatus={autoSaveStatus}
+        lastAutoSave={lastAutoSave}
+        onManualSave={performAutoSave}
+        magicWandTolerance={magicWandTolerance}
+        onMagicWandToleranceChange={setMagicWandTolerance}
+        magicWandEdgeThreshold={magicWandEdgeThreshold}
+        onMagicWandEdgeThresholdChange={setMagicWandEdgeThreshold}
       />
 
       <ImageSelector
@@ -1210,6 +1564,7 @@ const LabelEditor: React.FC = () => {
               {mode === 'draw-rect' && 'Click and drag to draw a rectangle'}
               {mode === 'batch' && 'Select an area to create multiple labels'}
               {mode === 'delete' && 'Click a label to delete it'}
+              {mode === 'magic-wand' && (magicWandLoading ? 'Detecting boundary...' : 'Click inside a cell to auto-detect its boundary')}
             </Text>
             <Text style={styles.info}>
               {imageData?.labels.length || 0} labels • {imageData?.width}×{imageData?.height}px • Zoom: {Math.round(viewScale * 100)}%
@@ -1274,6 +1629,7 @@ const LabelEditor: React.FC = () => {
                 viewScale={viewScale}
                 viewTranslateX={viewTranslateX}
                 viewTranslateY={viewTranslateY}
+                onMagicWandClick={isPanning || spacePressed ? () => {} : handleMagicWandClick}
               />
             </View>
           </View>

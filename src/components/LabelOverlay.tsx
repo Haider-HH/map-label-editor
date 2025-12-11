@@ -30,6 +30,8 @@ interface LabelOverlayProps {
   viewScale?: number;
   viewTranslateX?: number;
   viewTranslateY?: number;
+  // Magic wand
+  onMagicWandClick?: (point: Point) => void;
 }
 
 // Color mapping for different label types
@@ -67,6 +69,7 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
   viewScale = 1,
   viewTranslateX = 0,
   viewTranslateY = 0,
+  onMagicWandClick,
 }) => {
   const [hoveredLabel, setHoveredLabel] = useState<string | null>(null);
   const [draggingPoint, setDraggingPoint] = useState<{ labelId: string; pointIndex: number } | null>(null);
@@ -199,6 +202,11 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
         if (point.x >= 0 && point.x <= imageWidth && point.y >= 0 && point.y <= imageHeight) {
           onCanvasClick(point);
         }
+      } else if (mode === 'magic-wand' && onMagicWandClick) {
+        const point = getCoordinates(event);
+        if (point.x >= 0 && point.x <= imageWidth && point.y >= 0 && point.y <= imageHeight) {
+          onMagicWandClick(point);
+        }
       }
     };
 
@@ -245,7 +253,8 @@ const LabelOverlay: React.FC<LabelOverlayProps> = ({
     };
   }, [mode, onCanvasClick, scale, imageWidth, imageHeight, draggingPoint, onPointDrag, 
       isDrawingRect, onRectDrawStart, onRectDrawMove, onRectDrawEnd,
-      isSelectingBatch, onBatchSelectionStart, onBatchSelectionMove, onBatchSelectionEnd, batchSelectionRect]);
+      isSelectingBatch, onBatchSelectionStart, onBatchSelectionMove, onBatchSelectionEnd, batchSelectionRect,
+      onMagicWandClick]);
 
   const handlePointPressIn = useCallback((labelId: string, pointIndex: number) => {
     if (mode === 'edit') {
